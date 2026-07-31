@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "pvKernel: Build",
+            "type": "shell",
+            "command": "cargo build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "pvKernel: Run UEFI",
+            "type": "shell",
+            "command": "cargo run",
+            "problemMatcher": []
+        },
+        {
+            "label": "pvKernel: Format",
+            "type": "shell",
+            "command": "cargo fmt --all",
+            "problemMatcher": []
+        }
+    ]
+}

@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["kernel"]
+
+[package]
+name = "pvkernel-runner"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+ovmf-prebuilt = "0.2.4"
+
+[build-dependencies]
+kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+bootloader = "=0.11.17"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+
+# Local firmware and cache
+/ovmf/
+*.img
+*.iso
+
+# System files
+.DS_Store
+Thumbs.db

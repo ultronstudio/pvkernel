@@ -1,0 +1,14 @@
+[package]
+name = "kernel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+bootloader_api = "=0.11.17"
+uart_16550 = "0.4.0"
+x86_64 = "0.15.2"
+
+# bootloader_api: BootInfo structure and kernel output point
+# uart_16550: diagnostic output through serial port
+# x86_64: safe managing some CPU instructions
