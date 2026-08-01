@@ -46,20 +46,45 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show
 
+      - name: Cache cargo registry and build artifacts
+        # GitHub-hosted runners start from a cold cache on every run, and
+        # this workspace pulls in the full bootloader/cargo-xtask dependency
+        # tree plus prebuilt OVMF firmware. Caching keeps compile time out of
+        # the timeouts below instead of counting against them.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-qemu-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-qemu-tests-
+
       - name: Install QEMU
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86
 
+      - name: Build timer interrupt test binary
+        # Compiling here (untimed) keeps a cold-cache build from eating into
+        # the "timeout" budget of the run step below.
+        run: cargo build --features qemu-test
+
       - name: Run timer interrupt test
         # Boots headlessly, unmasks the PIT IRQ, enables hardware interrupts
         # and verifies the tick counter advances, then exits QEMU
         # deterministically via isa-debug-exit. Times out (and fails) if the
-        # kernel never reaches the success exit.
-        run: timeout 60 cargo run --features qemu-test -- --headless-test
+        # kernel never reaches the success exit. GitHub-hosted runners have
+        # no /dev/kvm, so QEMU falls back to slower TCG emulation; the
+        # timeout is generous to absorb that.
+        run: timeout 120 cargo run --features qemu-test -- --headless-test
+
+      - name: Build expected page-fault test binary
+        run: cargo build --features "qemu-test fault-tests"
 
       - name: Run expected page-fault test
         # Same as above, plus a deliberate page fault after the timer test;
         # the handler matches it against the expected faulting address and
         # exits successfully instead of halting.
-        run: timeout 60 cargo run --features "qemu-test fault-tests" -- --headless-test
+        run: timeout 120 cargo run --features "qemu-test fault-tests" -- --headless-test

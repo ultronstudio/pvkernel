@@ -44,6 +44,10 @@ claiming strict compliance.
   timer verification instead of before it, so a `fault-tests` build always
   exercises PIC/PIT timer interrupts before its deliberate fault.
 - The root runner's window title is now `pvKernel 0.0.4`.
+- The `qemu-tests` CI job now builds each headless test binary in an
+  untimed step before running it, and raises the run timeout to 120
+  seconds, since GitHub-hosted runners have no `/dev/kvm` and fall back to
+  slower TCG emulation.
 
 ## [0.0.3] - CPU Exception Correctness
 
