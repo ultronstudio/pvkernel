@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         .arg("-cpu")
         .arg("max")
         .arg("-name")
-        .arg("pvKernel 0.0.4")
+        .arg("pvKernel 0.0.5")
         .arg("-serial")
         .arg("stdio")
         .arg("-monitor")

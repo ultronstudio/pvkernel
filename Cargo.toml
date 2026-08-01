@@ -5,7 +5,7 @@ members = ["kernel"]
 [package]
 name = "pvkernel-runner"
 license = "MIT OR Apache-2.0"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 publish = false
 description = "An experimental x86_64 operating system kernel written in Rust, developed as the foundation of pvOS."
@@ -18,6 +18,9 @@ ovmf-prebuilt = "0.2.4"
 default = []
 # Forwards to the kernel's page-fault boot test; see docs/development/debugging.md.
 fault-tests = ["kernel/fault-tests"]
+# Forwards to the kernel's post-unmap page-fault boot test; see
+# docs/development/memory-testing.md.
+mem-fault-tests = ["kernel/mem-fault-tests"]
 # Forwards to the kernel's deterministic QEMU test support; see docs/development/testing.md.
 qemu-test = ["kernel/qemu-test"]
 

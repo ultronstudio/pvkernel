@@ -1,6 +1,6 @@
 [package]
 name = "kernel"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
@@ -22,6 +22,11 @@ default = []
 # exercise the page-fault handler. Disabled by default; see
 # docs/development/debugging.md for how to run it.
 fault-tests = []
+# Enables a boot-time test that maps, writes, unmaps, and then deliberately
+# re-accesses a temporary virtual page to exercise the page-fault handler's
+# not-present/supervisor/read classification. Disabled by default; see
+# docs/development/memory-testing.md for how to run it.
+mem-fault-tests = []
 # Enables QEMU isa-debug-exit support and expected-fault checks used by the
 # deterministic headless QEMU tests. Disabled by default; see
 # docs/development/testing.md for how to run them.
