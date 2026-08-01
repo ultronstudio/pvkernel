@@ -53,12 +53,13 @@ use crate::kprintln;
 /// corrupting memory.
 pub const TEMP_MAPPING_BASE: u64 = 0xFFFF_9000_0000_0000;
 
-/// Reserved base of a future userspace virtual-address range.
+/// Base of the reserved userspace virtual-address range.
 ///
-/// This is a policy reservation only. pvKernel 0.0.5 does not populate,
-/// map, or otherwise use this range; see
-/// [docs/architecture/virtual-memory.md](../../../../../docs/architecture/virtual-memory.md).
-#[allow(dead_code)]
+/// Starting in 0.0.6, `arch::x86_64::userspace` maps its (test-only) code,
+/// guard, and stack pages within this range; see
+/// [docs/architecture/virtual-memory.md](../../../../../docs/architecture/virtual-memory.md)
+/// and [docs/architecture/userspace-entry.md](../../../../../docs/architecture/userspace-entry.md).
+#[cfg_attr(not(feature = "userspace-test"), allow(dead_code))]
 pub const USERSPACE_RANGE_BASE: u64 = 0x0000_6000_0000_0000;
 
 /// Initializes the physical frame allocator and active page-table access.

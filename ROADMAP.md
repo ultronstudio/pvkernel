@@ -55,30 +55,56 @@ out of scope for this milestone and remain future roadmap items.
 > memory allocator" (0.0.5) and "virtual memory and kernel heap" (0.0.6)
 > into two releases. Implementation experience showed frame allocation and
 > page-table access are not independently useful, so they are combined
-> here; the kernel heap and `alloc` support move to 0.0.6 below. Frame
-> deallocation/reuse, guard pages, and userspace/user-accessible mappings
-> remain future work.
+> here; the kernel heap and `alloc` support move to 0.0.7 below (further
+> renumbered from 0.0.6; see the 0.0.6 note below). Frame deallocation/
+> reuse, guard pages, and userspace/user-accessible mappings remain future
+> work (userspace/user-accessible mappings arrive in 0.0.6 immediately
+> below).
 
-## 0.0.6 — Kernel Heap and Rust `alloc` Support
+## 0.0.6 — Userspace Entry and Syscall Foundation
+
+* dedicated ring-3 (CPL3) code/data GDT descriptors and a dedicated
+  TSS.RSP0 ring-transition kernel stack
+* the first CPL0 → CPL3 transition, via `iretq`
+* a minimal, provisional, scalar-only `int 0x80` syscall ABI (no
+  `SYSCALL`/`SYSRET`, no user-pointer arguments)
+* `USER_DATA`/`USER_CODE` page permissions, reusing the existing W^X
+  mapping API
+* three deterministic, headless QEMU tests exercising the syscall
+  boundary, an expected CPL3 privilege-instruction fault, and an expected
+  CPL3 supervisor-page fault
+
+> **Reordering note:** this milestone was originally planned as "Kernel
+> Heap and Rust `alloc` Support" (see below), with ring 3 and system calls
+> planned for 0.0.8. Implementation experience with the GDT/TSS and IDT
+> work from 0.0.2-0.0.5 made a first, deliberately minimal CPL0 → CPL3
+> transition and bootstrap syscall ABI a natural next step ahead of the
+> kernel heap, so it was pulled forward and the following milestones were
+> renumbered accordingly. This milestone explicitly does **not** add
+> `SYSCALL`/`SYSRET`, processes, threads, a scheduler, an ELF loader, or
+> user-pointer dereferencing (`copy_from_user`/`copy_to_user`) - those
+> remain future work, some of it now folded into 0.0.9 below.
+
+## 0.0.7 — Kernel Heap and Rust `alloc` Support
 
 * a kernel heap
 * Rust `alloc` support
 
-## 0.0.7 — Kernel Tasks and Scheduler
+## 0.0.8 — Kernel Tasks and Scheduler
 
 * kernel-level tasks
 * context switching
 * a preemptive scheduler
 
-## 0.0.8 — Ring 3 and System Calls
-
-* user mode execution
-* a system call interface
-
 ## 0.0.9 — ELF Userspace Loader and Init
 
 * loading ELF userspace binaries
 * a minimal init process
+* a process model built on top of 0.0.6's ring-3/syscall foundation and
+  0.0.8's scheduler (superseding the standalone "Ring 3 and System Calls"
+  milestone originally planned here, since that foundation now exists
+  earlier)
+
 
 ## 0.0.10 — VFS and Initial Ramdisk
 

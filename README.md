@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.5` — Virtual Memory Foundation
+Version: `0.0.6` — Userspace Entry and Syscall Foundation
 
 Implemented:
 
@@ -40,6 +40,16 @@ Implemented:
 * a boot-time memory smoke test and an optional post-unmap page-fault test
   behind the `mem-fault-tests` Cargo feature
 * deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
+* dedicated ring-3 (CPL3) code/data GDT descriptors and a dedicated
+  TSS.RSP0 ring-transition kernel stack
+* the first CPL0 → CPL3 transition, via `iretq` (test-only, behind Cargo
+  features)
+* a minimal, provisional, scalar-only `int 0x80` syscall ABI
+* `USER_DATA`/`USER_CODE` page permissions, reusing the existing W^X
+  mapping API
+* three deterministic, headless QEMU tests for the syscall boundary, an
+  expected CPL3 privilege-instruction fault, and an expected CPL3
+  supervisor-page fault
 * structured serial diagnostics
 * panic handler
 * an interrupt-enabled idle loop (plus a separate fatal halt path)
@@ -50,10 +60,13 @@ Not implemented:
 * keyboard or mouse input
 * frame deallocation/reuse (the physical frame allocator is monotonic only)
 * kernel heap or dynamic allocation
-* guard pages
+* guard pages (other than the fixed, unmapped guard page used by the
+  userspace test scenarios)
 * processes, threads, or a scheduler
-* user mode or system calls
+* `SYSCALL`/`SYSRET`, a process model, or general (non-test) userspace
+  execution
 * ELF userspace loading
+* `copy_from_user`/`copy_to_user` or any user-pointer dereferencing
 * filesystems
 * networking
 * device drivers beyond serial, framebuffer, PIC, and PIT

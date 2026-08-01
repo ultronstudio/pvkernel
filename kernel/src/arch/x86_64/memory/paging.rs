@@ -58,6 +58,29 @@ impl Permissions {
         user_accessible: false,
     };
 
+    /// Read-write, non-executable, user-accessible.
+    ///
+    /// Used for 0.0.6's test-only user stack page, and as the intermediate
+    /// staging permissions for a user code page (writable so the payload
+    /// bytes can be copied in, non-executable so the page is never both
+    /// writable and executable at once) before it is switched to
+    /// [`Permissions::USER_CODE`]. See `arch::x86_64::userspace`.
+    #[cfg_attr(not(feature = "userspace-test"), allow(dead_code))]
+    pub const USER_DATA: Self = Self {
+        writable: true,
+        executable: false,
+        user_accessible: true,
+    };
+
+    /// Read-only, executable, user-accessible. Final permissions for
+    /// 0.0.6's test-only user code page, once its contents are in place.
+    #[cfg_attr(not(feature = "userspace-test"), allow(dead_code))]
+    pub const USER_CODE: Self = Self {
+        writable: false,
+        executable: true,
+        user_accessible: true,
+    };
+
     fn to_flags(self) -> Result<PageTableFlags, MemoryError> {
         if self.writable && self.executable {
             return Err(MemoryError::InvalidPermissions);

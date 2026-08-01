@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.5. It does not describe planned or aspirational architecture; see
+version 0.0.6. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
@@ -21,6 +21,8 @@ pvKernel ELF (kernel_main)
         ├── arch::x86_64      – GDT, TSS, IDT, exception + IRQ handlers, PIC, PIT
         ├── arch::x86_64::memory – physical frame allocator, active page table
         │                          access, map/unmap/permission operations
+        ├── arch::x86_64::syscall – provisional int 0x80 syscall ABI
+        ├── arch::x86_64::userspace – test-only CPL0 → CPL3 (iretq) entry
         ├── graphics::framebuffer – centered blue "P" logo
         └── halt              – fatal halt vs. interrupt-enabled idle loop
 ```
@@ -37,10 +39,15 @@ pvKernel ELF (kernel_main)
 * **pvKernel**: everything from `kernel_main` onward. This includes serial
   diagnostics, the GDT/TSS, the IDT and its exception/IRQ handlers, the
   legacy 8259 PIC and PIT drivers, the physical frame allocator and active
-  page-table access, and framebuffer rendering.
-* **Future pvOS userspace**: not present in 0.0.5. Ring 3 execution, system
-  calls, and userspace loading are future roadmap items (see
-  [ROADMAP.md](ROADMAP.md)); pvKernel does not currently support them.
+  page-table access, a provisional `int 0x80` syscall ABI, and (test-only)
+  CPL0 → CPL3 userspace entry, and framebuffer rendering.
+* **Future pvOS userspace**: 0.0.6 adds only a minimal, test-only CPL0 →
+  CPL3 transition and bootstrap syscall ABI (see
+  [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)
+  and [docs/architecture/syscalls.md](docs/architecture/syscalls.md)); a
+  process model, scheduler, and ELF userspace loading remain future
+  roadmap items (see [ROADMAP.md](ROADMAP.md)); pvKernel does not
+  currently support them.
 
 ## Initialization order
 
@@ -51,9 +58,14 @@ pvKernel ELF (kernel_main)
    1. Maskable hardware interrupts are disabled
       (`x86_64::instructions::interrupts::disable()`).
    2. The kernel-owned GDT and TSS are built and loaded
-      (`arch::x86_64::gdt`), including the dedicated double-fault IST stack.
+      (`arch::x86_64::gdt`), including the dedicated double-fault IST stack,
+      ring-3 (CPL3) code/data segment descriptors, and a dedicated
+      TSS.RSP0 ring-transition kernel stack (see
+      [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)).
    3. The kernel-owned IDT is built and loaded (`arch::x86_64::interrupts`),
-      including handlers for all 16 remapped IRQ vectors (32-47). This must
+      including handlers for all 16 remapped IRQ vectors (32-47) and the
+      `int 0x80` syscall gate (see
+      [docs/architecture/syscalls.md](docs/architecture/syscalls.md)). This must
       happen after the GDT/TSS, because the double-fault entry references an
       IST index that is only meaningful once the TSS is active.
    4. The physical frame allocator and active page-table access are
@@ -85,7 +97,11 @@ pvKernel ELF (kernel_main)
     mapped, written to, unmapped, and deliberately re-accessed, matching the
     resulting page fault against its expected address (see
     [docs/development/memory-testing.md](docs/development/memory-testing.md)).
-11. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
+11. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
+    test payload is mapped into the reserved userspace range and entered at
+    CPL3 via `iretq`; the scenario ends deterministically (see
+    [docs/development/userspace-testing.md](docs/development/userspace-testing.md)).
+12. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
     the `qemu-test` Cargo feature is enabled, in which case QEMU exits
     deterministically instead (see
     [docs/development/testing.md](docs/development/testing.md)).
@@ -109,7 +125,11 @@ items.
 * a 64-bit kernel code segment descriptor;
 * a TSS descriptor, wrapping a kernel-owned `TaskStateSegment`;
 * a dedicated double-fault stack (5 × 4 KiB), referenced by IST index
-  `DOUBLE_FAULT_IST_INDEX`.
+  `DOUBLE_FAULT_IST_INDEX`;
+* ring-3 (CPL3) code and data segment descriptors, and a dedicated,
+  writable TSS.RSP0 ring-transition kernel stack (4 × 4 KiB), used only
+  when entering CPL3 (see
+  [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)).
 
 The GDT and TSS are stored in `spin::Once` cells with `'static` storage
 duration, loaded once, and never replaced during the kernel's lifetime.
@@ -142,15 +162,29 @@ for the full design, including the safety invariants for reconstructing the
 active page table and the permission (W^X) model enforced by every mapping
 operation.
 
+## Syscall and userspace entry ownership (0.0.6)
+
+`arch::x86_64::syscall` owns a minimal, provisional, scalar-only `int 0x80`
+syscall ABI: a naked-asm entry stub installed into the IDT's vector `0x80`,
+a `SyscallFrame` register-frame layout built on the RSP0 stack, and a
+Rust-side dispatcher. `arch::x86_64::userspace` owns the (test-only, behind
+Cargo features) code that maps a hand-written payload into the reserved
+userspace virtual-address range and transitions into it via `iretq`. See
+[docs/architecture/syscalls.md](docs/architecture/syscalls.md) and
+[docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)
+for the full design.
+
 ## Fatal exception behavior
 
 Breakpoint exceptions log the event and return normally. Invalid opcode,
 general protection fault, page fault, and double fault are treated as fatal:
 they log structured diagnostics (exception name, error code where relevant,
-faulting address for page faults, and the interrupt stack frame) and then
-call `halt::halt_forever` directly (or, under the `qemu-test` feature, exit
-QEMU with a failure status instead), without invoking `panic!`. The one
-exception is a deliberately triggered page fault under the `fault-tests`
-feature: when it matches the expected faulting address, it is treated as a
-passed test rather than a fatal condition (see
-[docs/development/testing.md](docs/development/testing.md)).
+faulting address for page faults, the CPL the fault originated from, and the
+interrupt stack frame) and then call `halt::halt_forever` directly (or,
+under the `qemu-test` feature, exit QEMU with a failure status instead),
+without invoking `panic!`. The exceptions are deliberately triggered faults
+under the `fault-tests`, `userspace-privilege-fault-test`, and
+`userspace-supervisor-fault-test` features: when one matches its expected
+signature, it is treated as a passed test rather than a fatal condition (see
+[docs/development/testing.md](docs/development/testing.md) and
+[docs/development/userspace-testing.md](docs/development/userspace-testing.md)).

@@ -20,8 +20,14 @@ pub fn halt_forever() -> ! {
 /// corresponding handler runs and returns, and the loop parks again.
 ///
 /// Unused under `qemu-test`, where a successful boot always exits QEMU
-/// (`arch::x86_64::qemu::exit_success`) instead of idling forever.
-#[cfg_attr(feature = "qemu-test", allow(dead_code))]
+/// (`arch::x86_64::qemu::exit_success`) instead of idling forever. Also
+/// unused under `userspace-test`, where `main::kernel_main` diverges into
+/// `arch::x86_64::userspace::run_test` instead of ever reaching this idle
+/// loop.
+#[cfg_attr(
+    any(feature = "qemu-test", feature = "userspace-test"),
+    allow(dead_code)
+)]
 pub fn idle_loop() -> ! {
     loop {
         hlt();

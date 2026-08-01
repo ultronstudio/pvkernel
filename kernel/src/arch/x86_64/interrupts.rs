@@ -1,7 +1,10 @@
+#[cfg(any(feature = "qemu-test", feature = "userspace-syscall-test"))]
+use core::sync::atomic::Ordering;
 #[cfg(feature = "qemu-test")]
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64};
 
 use spin::Once;
+use x86_64::VirtAddr;
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
@@ -62,12 +65,30 @@ pub fn init() {
         idt[IrqLine::PrimaryAta.vector()].set_handler_fn(irq14_handler);
         idt[IrqLine::SecondaryAta.vector()].set_handler_fn(slave_spurious_interrupt_handler);
 
+        // SAFETY: `pvkernel_syscall_entry_stub` is a naked-asm function
+        // (see `syscall::entry`) that builds its own valid `iretq`-based
+        // return sequence instead of following the `x86-interrupt`
+        // calling convention `set_handler_fn` expects, which is why this
+        // uses the raw `set_handler_addr` API. Its address is a plain
+        // function pointer to code that exists for the kernel's entire
+        // lifetime, and `set_privilege_level(Ring3)` is required for the
+        // gate to be reachable by a CPL3 `int 0x80` at all (the default
+        // gate DPL only permits CPL0).
+        unsafe {
+            idt[0x80]
+                .set_handler_addr(VirtAddr::new(
+                    super::syscall::pvkernel_syscall_entry_stub as *const () as u64,
+                ))
+                .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        }
+
         idt
     });
 
     idt.load();
 
     kprintln!("[cpu] IDT loaded");
+    kprintln!("[cpu] int 0x80 syscall gate installed (ring 3 callable)");
 }
 
 /// Triggers a `int3` breakpoint exception as a boot-time verification that
@@ -86,6 +107,83 @@ pub fn run_breakpoint_test() {
 static EXPECTED_PAGE_FAULT: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "qemu-test")]
 static EXPECTED_PAGE_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+
+/// Set while the `userspace-privilege-fault-test` scenario's deliberate
+/// CPL3 `cli` fault is in flight. Only meaningful under `qemu-test`; without
+/// it, the fault is fatal and the kernel halts, matching the existing
+/// `fault-tests`/`mem-fault-tests` convention (see
+/// `memory::run_unmap_fault_test`).
+#[cfg(all(feature = "qemu-test", feature = "userspace-privilege-fault-test"))]
+static EXPECTED_PRIVILEGE_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// Arms the expected privilege-fault check. Only called from
+/// `userspace::run_privilege_fault_test`, immediately before entering CPL3.
+/// A no-op without `qemu-test` (see [`EXPECTED_PRIVILEGE_FAULT`]).
+#[cfg(feature = "userspace-privilege-fault-test")]
+pub(crate) fn arm_expected_privilege_fault() {
+    #[cfg(feature = "qemu-test")]
+    EXPECTED_PRIVILEGE_FAULT.store(true, Ordering::Relaxed);
+}
+
+/// Checks whether a `#GP` observed at `cpl` exactly matches the fault
+/// [`arm_expected_privilege_fault`] deliberately armed: it must have
+/// originated at CPL3 (a CPL0 `#GP` is never this test's expected fault,
+/// even while armed - that would be a real kernel bug). Disarms itself on a
+/// match so it cannot be reused for a later, unrelated fault.
+#[cfg(all(feature = "qemu-test", feature = "userspace-privilege-fault-test"))]
+fn take_expected_privilege_fault_if_matches(cpl: x86_64::PrivilegeLevel) -> bool {
+    if EXPECTED_PRIVILEGE_FAULT.load(Ordering::Relaxed) && cpl == x86_64::PrivilegeLevel::Ring3 {
+        EXPECTED_PRIVILEGE_FAULT.store(false, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// Set while the `userspace-supervisor-fault-test` scenario's deliberate
+/// CPL3 read of a supervisor-only page is in flight. Only meaningful under
+/// `qemu-test`; see [`EXPECTED_PRIVILEGE_FAULT`] for why.
+#[cfg(all(feature = "qemu-test", feature = "userspace-supervisor-fault-test"))]
+static EXPECTED_SUPERVISOR_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(feature = "qemu-test", feature = "userspace-supervisor-fault-test"))]
+static EXPECTED_SUPERVISOR_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+
+/// Arms the expected supervisor-page-fault check for `addr`. Only called
+/// from `userspace::run_supervisor_fault_test`, immediately before entering
+/// CPL3. A no-op without `qemu-test`.
+#[cfg(feature = "userspace-supervisor-fault-test")]
+pub(crate) fn arm_expected_supervisor_fault(addr: u64) {
+    #[cfg(feature = "qemu-test")]
+    {
+        EXPECTED_SUPERVISOR_FAULT_ADDRESS.store(addr, Ordering::Relaxed);
+        EXPECTED_SUPERVISOR_FAULT_ARMED.store(true, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "qemu-test"))]
+    let _ = addr;
+}
+
+/// Checks whether a `#PF` at `addr` with `error_code` exactly matches the
+/// fault [`arm_expected_supervisor_fault`] deliberately armed: present
+/// (protection violation, not not-present), caused by a CPL3 (user-mode)
+/// access, a read (not a write), and not an instruction fetch - exactly
+/// what a CPL3 data read of a mapped-but-supervisor-only page produces.
+/// Disarms itself on a match so it cannot be reused for a later, unrelated
+/// fault.
+#[cfg(all(feature = "qemu-test", feature = "userspace-supervisor-fault-test"))]
+fn take_expected_supervisor_fault_if_matches(addr: u64, error_code: PageFaultErrorCode) -> bool {
+    if EXPECTED_SUPERVISOR_FAULT_ARMED.load(Ordering::Relaxed)
+        && addr == EXPECTED_SUPERVISOR_FAULT_ADDRESS.load(Ordering::Relaxed)
+        && error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(PageFaultErrorCode::USER_MODE)
+        && !error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && !error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH)
+    {
+        EXPECTED_SUPERVISOR_FAULT_ARMED.store(false, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
 
 /// Deliberately reads from an unmapped virtual address to verify the
 /// page-fault handler. Only invoked when the `fault-tests` feature is
@@ -137,7 +235,20 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let cpl = stack_frame.code_segment.rpl();
+
+    #[cfg(all(feature = "qemu-test", feature = "userspace-privilege-fault-test"))]
+    if take_expected_privilege_fault_if_matches(cpl) {
+        kprintln!("[exception] general protection fault");
+        kprintln!("origin: CPL{}", cpl as u8);
+        kprintln!("error code: {:#x}", error_code);
+        kprintln!("{:#?}", stack_frame);
+        kprintln!("[test] expected CPL3 privilege fault matched");
+        qemu::exit_success();
+    }
+
     kprintln!("[exception] general protection fault");
+    kprintln!("origin: CPL{}", cpl as u8);
     kprintln!("error code: {:#x}", error_code);
     kprintln!("{:#?}", stack_frame);
     fatal_exit();
@@ -148,11 +259,13 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     let faulting_address = Cr2::read_raw();
+    let cpl = stack_frame.code_segment.rpl();
 
     #[cfg(feature = "qemu-test")]
     if memory::take_expected_unmap_fault_if_matches(faulting_address, error_code) {
         kprintln!("[exception] page fault");
         kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("origin: CPL{}", cpl as u8);
         kprintln!("error code: {:?}", error_code);
         kprintln!("{:#?}", stack_frame);
         kprintln!("[test] expected post-unmap page fault matched");
@@ -165,14 +278,27 @@ extern "x86-interrupt" fn page_fault_handler(
     {
         kprintln!("[exception] page fault");
         kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("origin: CPL{}", cpl as u8);
         kprintln!("error code: {:?}", error_code);
         kprintln!("{:#?}", stack_frame);
         kprintln!("[test] expected page fault matched");
         qemu::exit_success();
     }
 
+    #[cfg(all(feature = "qemu-test", feature = "userspace-supervisor-fault-test"))]
+    if take_expected_supervisor_fault_if_matches(faulting_address, error_code) {
+        kprintln!("[exception] page fault");
+        kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("origin: CPL{}", cpl as u8);
+        kprintln!("error code: {:?}", error_code);
+        kprintln!("{:#?}", stack_frame);
+        kprintln!("[test] expected CPL3 supervisor-page fault matched");
+        qemu::exit_success();
+    }
+
     kprintln!("[exception] page fault");
     kprintln!("faulting address (CR2): {:#x}", faulting_address);
+    kprintln!("origin: CPL{}", cpl as u8);
     kprintln!("error code: {:?}", error_code);
     kprintln!("{:#?}", stack_frame);
     fatal_exit();
@@ -192,8 +318,20 @@ extern "x86-interrupt" fn double_fault_handler(
 /// counted as delivered before the kernel has actually observed it. Must not
 /// log, allocate, lock, or format text: any of those could stall or recurse
 /// while interrupting arbitrary kernel state.
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+///
+/// Under `userspace-syscall-test`, also records (in a single atomic store,
+/// no lock, no formatting) whether this tick interrupted CPL3 execution -
+/// this is the only instrumentation the userspace syscall test needs, and
+/// it must stay this cheap so the fast path above is never affected.
+#[cfg_attr(not(feature = "userspace-syscall-test"), allow(unused_variables))]
+extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
     super::pit::record_tick();
+
+    #[cfg(feature = "userspace-syscall-test")]
+    if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
+        super::syscall::test::TIMER_INTERRUPTED_CPL3.store(true, Ordering::Relaxed);
+    }
+
     pic::notify_end_of_interrupt(IrqLine::Timer);
 }
 

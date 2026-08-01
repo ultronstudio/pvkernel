@@ -5,7 +5,7 @@ members = ["kernel"]
 [package]
 name = "pvkernel-runner"
 license = "MIT OR Apache-2.0"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 publish = false
 description = "An experimental x86_64 operating system kernel written in Rust, developed as the foundation of pvOS."
@@ -23,6 +23,18 @@ fault-tests = ["kernel/fault-tests"]
 mem-fault-tests = ["kernel/mem-fault-tests"]
 # Forwards to the kernel's deterministic QEMU test support; see docs/development/testing.md.
 qemu-test = ["kernel/qemu-test"]
+# Forwards to the kernel's ring-3 entry/syscall test scaffolding; see
+# docs/architecture/userspace-entry.md. Not meant to be enabled directly.
+userspace-test = ["kernel/userspace-test"]
+# Forwards to the kernel's userspace syscall-boundary test; see
+# docs/development/userspace-testing.md.
+userspace-syscall-test = ["kernel/userspace-syscall-test"]
+# Forwards to the kernel's userspace privilege-fault test; see
+# docs/development/userspace-testing.md.
+userspace-privilege-fault-test = ["kernel/userspace-privilege-fault-test"]
+# Forwards to the kernel's userspace supervisor-page-fault test; see
+# docs/development/userspace-testing.md.
+userspace-supervisor-fault-test = ["kernel/userspace-supervisor-fault-test"]
 
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
