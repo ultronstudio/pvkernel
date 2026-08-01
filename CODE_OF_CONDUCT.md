@@ -12,24 +12,24 @@ treat other participants with courtesy, regardless of experience level.
 
 ## Expected behavior
 
-- Communicate clearly and assume good faith.
-- Focus criticism on code, design decisions, evidence, and observed behavior,
+* Communicate clearly and assume good faith.
+* Focus criticism on code, design decisions, evidence, and observed behavior,
   not on a person's worth, identity, or competence in general.
-- Disagree on technical matters openly; technical disagreement is a normal
+* Disagree on technical matters openly; technical disagreement is a normal
   and healthy part of kernel development.
-- Provide constructive, specific feedback, especially in code review.
-- Respect maintainers' decisions about scope, direction, and priorities, even
+* Provide constructive, specific feedback, especially in code review.
+* Respect maintainers' decisions about scope, direction, and priorities, even
   when you disagree with them.
 
 ## Unacceptable behavior
 
-- Harassment, threats, or intimidation of any participant.
-- Discriminatory remarks or jokes based on personal characteristics.
-- Doxxing or publishing others' private information without consent.
-- Personal attacks, insults, or demeaning language directed at a person
+* Harassment, threats, or intimidation of any participant.
+* Discriminatory remarks or jokes based on personal characteristics.
+* Doxxing or publishing others' private information without consent.
+* Personal attacks, insults, or demeaning language directed at a person
   rather than their contribution.
-- Sustained disruption of discussions, issues, or pull requests.
-- Using the private security-reporting channel for ordinary interpersonal
+* Sustained disruption of discussions, issues, or pull requests.
+* Using the private security-reporting channel for ordinary interpersonal
   disagreements instead of its intended purpose.
 
 ## Scope

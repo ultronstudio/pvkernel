@@ -22,11 +22,11 @@ pvKernel's CPU exception vectors (0-31), which would make a hardware IRQ
 indistinguishable from a CPU exception. `pic::initialize` remaps them with
 the standard Initialization Command Word (ICW) sequence:
 
-- master PIC (command `0x20`, data `0x21`) → vectors 32-39
-- slave PIC (command `0xA0`, data `0xA1`) → vectors 40-47
-- the master is told a slave is cascaded on IRQ2 (ICW3 `0x04` on the master,
+* master PIC (command `0x20`, data `0x21`) → vectors 32-39
+* slave PIC (command `0xA0`, data `0xA1`) → vectors 40-47
+* the master is told a slave is cascaded on IRQ2 (ICW3 `0x04` on the master,
   `0x02` on the slave, its cascade identity)
-- both chips are configured for 8086/88 mode (ICW4 `0x01`)
+* both chips are configured for 8086/88 mode (ICW4 `0x01`)
 
 A short read from I/O port `0x80` (`io_wait`) is issued between each command
 byte, since some hardware needs a small delay for the PIC to process each
@@ -40,9 +40,9 @@ the only line unmasked in 0.0.4.
 `pic::IrqLine` is a 16-variant enum (`Timer` through `SecondaryAta`,
 matching the standard IRQ0-IRQ15 assignment) with helpers to compute:
 
-- `vector()` — the remapped IDT vector (32 + IRQ number);
-- `is_slave()` — whether the line is served by the slave PIC (IRQ8-15);
-- `bit()` — the corresponding mask/ISR bit on whichever chip serves it.
+* `vector()` — the remapped IDT vector (32 + IRQ number);
+* `is_slave()` — whether the line is served by the slave PIC (IRQ8-15);
+* `bit()` — the corresponding mask/ISR bit on whichever chip serves it.
 
 [kernel/src/arch/x86_64/interrupts.rs](../../kernel/src/arch/x86_64/interrupts.rs)
 uses `IrqLine::vector()` to install a handler for every remapped vector
@@ -78,9 +78,9 @@ In-Service Register (ISR) via OCW3 (`pic::master_in_service` /
 `pic::slave_in_service`, command byte `0x0B` then a read of the same data
 port): if the corresponding ISR bit is not set, the IRQ was spurious.
 
-- **Spurious IRQ7** (master): no EOI is sent at all, since the master never
+* **Spurious IRQ7** (master): no EOI is sent at all, since the master never
   actually latched it as in-service.
-- **Spurious IRQ15** (slave): the slave is not in service, but the master
+* **Spurious IRQ15** (slave): the slave is not in service, but the master
   *did* latch IRQ2 (the cascade line) as in-service, since it has no way to
   know the interrupt was spurious until the slave is queried. The handler
   sends EOI only to the master (reusing `notify_end_of_interrupt(IrqLine::

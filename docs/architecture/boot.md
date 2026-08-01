@@ -46,18 +46,18 @@ crate; it is not part of pvKernel.
 
 ## Notes
 
-- The rust-osdev bootloader's own page table mapping is still active when
+* The rust-osdev bootloader's own page table mapping is still active when
   `kernel_main` runs; pvKernel does not currently replace it. Virtual memory
   management is a future milestone (see [ROADMAP.md](../../ROADMAP.md)).
-- Steps 10-11 (PIC/PIT setup) happen before the framebuffer is initialized,
+* Steps 10-11 (PIC/PIT setup) happen before the framebuffer is initialized,
   but every IRQ line stays masked and maskable interrupts stay disabled
   until step 14, so no hardware interrupt can be delivered before the IDT,
   PIC, and PIT are all fully configured.
-- The boot flow above matches `cargo run`. `cargo run --features
+* The boot flow above matches `cargo run`. `cargo run --features
   fault-tests` performs one additional step after the timer verification: a
   deliberate page fault, described in
   [docs/development/debugging.md](../development/debugging.md).
-- `cargo run --features qemu-test -- --headless-test` (optionally combined
+* `cargo run --features qemu-test -- --headless-test` (optionally combined
   with `fault-tests`) follows the same steps but exits QEMU deterministically
   at the end instead of idling forever; see
   [docs/development/testing.md](../development/testing.md).

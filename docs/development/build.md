@@ -89,13 +89,13 @@ command verifies.
 
 ## Common build failures
 
-- **`error: toolchain 'nightly-...' is not installed`**: run `rustup show`
+* **`error: toolchain 'nightly-...' is not installed`**: run `rustup show`
   from the repository root to install the pinned toolchain.
-- **`qemu-system-x86_64: command not found`**: install `qemu-system-x86`
+* **`qemu-system-x86_64: command not found`**: install `qemu-system-x86`
   (see step 1).
-- **QEMU window does not appear under WSL2**: see the WSLg notes in
+* **QEMU window does not appear under WSL2**: see the WSLg notes in
   [docs/development/debugging.md](debugging.md).
-- **`CARGO_BIN_FILE_KERNEL_kernel` not set / bindeps errors**: ensure
+* **`CARGO_BIN_FILE_KERNEL_kernel` not set / bindeps errors**: ensure
   [.cargo/config.toml](../../.cargo/config.toml) is present and unmodified;
   it enables the unstable `bindeps` feature required to depend on the
   `kernel` binary artifact from the root package's `build.rs`.

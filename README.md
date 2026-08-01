@@ -15,42 +15,42 @@ Version: `0.0.4` — Hardware Interrupts and Timer
 
 Implemented:
 
-- UEFI boot
-- x86_64 kernel entry point
-- boot memory map access
-- linear framebuffer access
-- a kernel-owned Global Descriptor Table (GDT)
-- a kernel-owned Task State Segment (TSS)
-- a dedicated Interrupt Stack Table stack for double faults
-- a kernel-owned Interrupt Descriptor Table (IDT)
-- exception handlers for breakpoint, invalid opcode, general protection
+* UEFI boot
+* x86_64 kernel entry point
+* boot memory map access
+* linear framebuffer access
+* a kernel-owned Global Descriptor Table (GDT)
+* a kernel-owned Task State Segment (TSS)
+* a dedicated Interrupt Stack Table stack for double faults
+* a kernel-owned Interrupt Descriptor Table (IDT)
+* exception handlers for breakpoint, invalid opcode, general protection
   fault, page fault, and double fault
-- a controlled breakpoint (`int3`) boot-time verification
-- an optional page-fault test behind the `fault-tests` Cargo feature
-- a legacy 8259 PIC driver (IRQ vector remapping, masking, EOI, spurious IRQ
+* a controlled breakpoint (`int3`) boot-time verification
+* an optional page-fault test behind the `fault-tests` Cargo feature
+* a legacy 8259 PIC driver (IRQ vector remapping, masking, EOI, spurious IRQ
   detection)
-- a PIT channel 0 periodic timer with an atomic tick counter
-- IDT handlers for all 16 remapped IRQ vectors, with a boot-time verification
+* a PIT channel 0 periodic timer with an atomic tick counter
+* IDT handlers for all 16 remapped IRQ vectors, with a boot-time verification
   that maskable hardware interrupts are safely enabled and timer ticks are
   delivered
-- deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
-- structured serial diagnostics
-- panic handler
-- an interrupt-enabled idle loop (plus a separate fatal halt path)
+* deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
+* structured serial diagnostics
+* panic handler
+* an interrupt-enabled idle loop (plus a separate fatal halt path)
 
 Not implemented:
 
-- APIC initialization
-- keyboard or mouse input
-- physical memory allocator
-- virtual memory manager
-- kernel heap or dynamic allocation
-- processes, threads, or a scheduler
-- user mode or system calls
-- ELF userspace loading
-- filesystems
-- networking
-- device drivers beyond serial, framebuffer, PIC, and PIT
+* APIC initialization
+* keyboard or mouse input
+* physical memory allocator
+* virtual memory manager
+* kernel heap or dynamic allocation
+* processes, threads, or a scheduler
+* user mode or system calls
+* ELF userspace loading
+* filesystems
+* networking
+* device drivers beyond serial, framebuffer, PIC, and PIT
 
 pvKernel does not claim production readiness, general hardware support,
 process isolation, a stable ABI, or readiness as a reusable kernel or pvOS
@@ -122,24 +122,24 @@ services are implemented by pvKernel itself. See
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — current kernel architecture
-- [docs/architecture/boot.md](docs/architecture/boot.md) — boot flow
-- [docs/architecture/interrupts.md](docs/architecture/interrupts.md) —
+* [ARCHITECTURE.md](ARCHITECTURE.md) — current kernel architecture
+* [docs/architecture/boot.md](docs/architecture/boot.md) — boot flow
+* [docs/architecture/interrupts.md](docs/architecture/interrupts.md) —
   IDT and exception handling
-- [docs/architecture/hardware-interrupts.md](docs/architecture/hardware-interrupts.md) —
+* [docs/architecture/hardware-interrupts.md](docs/architecture/hardware-interrupts.md) —
   legacy 8259 PIC driver
-- [docs/architecture/timer.md](docs/architecture/timer.md) — PIT timer driver
-- [docs/development/build.md](docs/development/build.md) — build environment
-- [docs/development/debugging.md](docs/development/debugging.md) —
+* [docs/architecture/timer.md](docs/architecture/timer.md) — PIT timer driver
+* [docs/development/build.md](docs/development/build.md) — build environment
+* [docs/development/debugging.md](docs/development/debugging.md) —
   debugging and diagnostics
-- [docs/development/testing.md](docs/development/testing.md) —
+* [docs/development/testing.md](docs/development/testing.md) —
   deterministic headless QEMU tests
-- [docs/dependencies.md](docs/dependencies.md) — direct dependency review
-- [ROADMAP.md](ROADMAP.md) — planned milestones
-- [CHANGELOG.md](CHANGELOG.md) — release history
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guide
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community expectations
-- [SECURITY.md](SECURITY.md) — security policy
+* [docs/dependencies.md](docs/dependencies.md) — direct dependency review
+* [ROADMAP.md](ROADMAP.md) — planned milestones
+* [CHANGELOG.md](CHANGELOG.md) — release history
+* [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guide
+* [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community expectations
+* [SECURITY.md](SECURITY.md) — security policy
 
 ## License
 

@@ -24,17 +24,17 @@ pvKernel ELF (kernel_main)
 
 ## Responsibility boundary
 
-- **UEFI firmware**: powers on the machine, initializes basic platform
+* **UEFI firmware**: powers on the machine, initializes basic platform
   devices, and runs the boot manager.
-- **rust-osdev bootloader**: locates and loads the pvKernel ELF binary,
+* **rust-osdev bootloader**: locates and loads the pvKernel ELF binary,
   establishes an initial 4-level page table mapping and stack, collects the
   boot memory map and framebuffer information into `BootInfo`, and transfers
   control to `kernel_main`. pvKernel does not currently own or replace this
   page table mapping.
-- **pvKernel**: everything from `kernel_main` onward. This includes serial
+* **pvKernel**: everything from `kernel_main` onward. This includes serial
   diagnostics, the GDT/TSS, the IDT and its exception/IRQ handlers, the
   legacy 8259 PIC and PIT drivers, and framebuffer rendering.
-- **Future pvOS userspace**: not present in 0.0.4. Ring 3 execution, system
+* **Future pvOS userspace**: not present in 0.0.4. Ring 3 execution, system
   calls, and userspace loading are future roadmap items (see
   [ROADMAP.md](ROADMAP.md)); pvKernel does not currently support them.
 
@@ -87,9 +87,9 @@ items.
 
 `arch::x86_64::gdt` owns:
 
-- a 64-bit kernel code segment descriptor;
-- a TSS descriptor, wrapping a kernel-owned `TaskStateSegment`;
-- a dedicated double-fault stack (5 × 4 KiB), referenced by IST index
+* a 64-bit kernel code segment descriptor;
+* a TSS descriptor, wrapping a kernel-owned `TaskStateSegment`;
+* a dedicated double-fault stack (5 × 4 KiB), referenced by IST index
   `DOUBLE_FAULT_IST_INDEX`.
 
 The GDT and TSS are stored in `spin::Once` cells with `'static` storage

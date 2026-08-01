@@ -24,9 +24,9 @@ that as a triple fault, not a design goal.
 If QEMU's window closes or the process exits shortly after boot with no
 fatal-exception message printed, check for:
 
-- a fault occurring before serial output is initialized (unlikely in current
+* a fault occurring before serial output is initialized (unlikely in current
   code, since serial is initialized first in `kernel_main`);
-- a fault inside a fault handler itself, which can escalate to a double or
+* a fault inside a fault handler itself, which can escalate to a double or
   triple fault instead of printing the expected single diagnostic block.
 
 ## Breakpoint test

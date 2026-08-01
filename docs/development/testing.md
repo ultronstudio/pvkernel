@@ -23,13 +23,13 @@ status byte to QEMU's `isa-debug-exit` I/O port (`0xF4`) and never return
 (falling back to `halt::halt_forever` if QEMU somehow does not exit). With
 `qemu-test` enabled:
 
-- `kernel_main` calls `qemu::exit_success()` once the boot-time timer
+* `kernel_main` calls `qemu::exit_success()` once the boot-time timer
   verification (see [docs/architecture/timer.md](../architecture/timer.md))
   and, if `fault-tests` is also enabled, the expected page-fault check
   complete successfully, instead of entering the normal idle loop.
-- the panic handler calls `qemu::exit_failure()` instead of
+* the panic handler calls `qemu::exit_failure()` instead of
   `halt::halt_forever()`.
-- `interrupts::page_fault_handler` recognizes a deliberately triggered fault
+* `interrupts::page_fault_handler` recognizes a deliberately triggered fault
   (address and in-flight flag set by `run_page_fault_test`) and calls
   `qemu::exit_success()` directly, instead of treating it as fatal.
 
@@ -59,8 +59,8 @@ exit status `(v << 1) | 1`. `qemu::ExitCode::Success` (`0x10`) therefore
 becomes host status 33, and `Failure` (`0x11`) becomes 35. The runner, when
 `--headless-test` is passed, only treats status 33 as a pass:
 
-- exactly 33 → the runner exits with `ExitCode::SUCCESS` (process exit 0);
-- any other status, or termination by signal (for example, a `timeout` kill)
+* exactly 33 → the runner exits with `ExitCode::SUCCESS` (process exit 0);
+* any other status, or termination by signal (for example, a `timeout` kill)
   → the runner prints a diagnostic and exits with `ExitCode::FAILURE`.
 
 Without `--headless-test`, the runner keeps its original behavior: any
