@@ -5,6 +5,9 @@ pub mod pic;
 pub mod pit;
 #[cfg(feature = "qemu-test")]
 pub mod qemu;
+pub mod syscall;
+#[cfg(feature = "userspace-test")]
+pub mod userspace;
 
 use bootloader_api::BootInfo;
 

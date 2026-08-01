@@ -14,7 +14,9 @@ use core::panic::PanicInfo;
 use arch::x86_64::pic::{self, IrqLine};
 use arch::x86_64::pit;
 #[cfg(not(feature = "qemu-test"))]
-use halt::{halt_forever, idle_loop};
+use halt::halt_forever;
+#[cfg(all(not(feature = "qemu-test"), not(feature = "userspace-test")))]
+use halt::idle_loop;
 
 /// Requests a physical-memory offset mapping from the bootloader
 /// (`BootInfo::physical_memory_offset`), which `arch::x86_64::memory` needs
@@ -42,7 +44,7 @@ const TIMER_TEST_TICKS: u64 = 5;
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kprintln!();
     kprintln!("========================================");
-    kprintln!("pvKernel 0.0.5");
+    kprintln!("pvKernel 0.0.6");
     kprintln!("Architecture: x86_64");
     kprintln!("Boot mode: UEFI");
     kprintln!("========================================");
@@ -118,14 +120,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "mem-fault-tests")]
     arch::x86_64::memory::run_unmap_fault_test();
 
-    kprintln!("pvKernel 0.0.5 initialized");
-    kprintln!("entering interrupt-enabled idle loop");
+    // `run_test` never returns: every scenario it selects ends by exiting
+    // QEMU or halting/panicking. Everything below is therefore compiled
+    // out under `userspace-test`, rather than left as dead but reachable
+    // code after a diverging call.
+    #[cfg(feature = "userspace-test")]
+    arch::x86_64::userspace::run_test();
 
-    #[cfg(feature = "qemu-test")]
-    arch::x86_64::qemu::exit_success();
+    #[cfg(not(feature = "userspace-test"))]
+    {
+        kprintln!("pvKernel 0.0.6 initialized");
+        kprintln!("entering interrupt-enabled idle loop");
 
-    #[cfg(not(feature = "qemu-test"))]
-    idle_loop();
+        #[cfg(feature = "qemu-test")]
+        arch::x86_64::qemu::exit_success();
+
+        #[cfg(not(feature = "qemu-test"))]
+        idle_loop();
+    }
 }
 
 #[panic_handler]
