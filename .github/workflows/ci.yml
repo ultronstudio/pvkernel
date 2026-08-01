@@ -26,3 +26,40 @@ jobs:
 
       - name: Build workspace
         run: cargo build
+
+      - name: Build with fault-tests feature
+        run: cargo build --features fault-tests
+
+      - name: Build with qemu-test feature
+        run: cargo build --features qemu-test
+
+      - name: Build with qemu-test and fault-tests features
+        run: cargo build --features "qemu-test fault-tests"
+
+  qemu-tests:
+    name: Deterministic QEMU interrupt tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Run timer interrupt test
+        # Boots headlessly, unmasks the PIT IRQ, enables hardware interrupts
+        # and verifies the tick counter advances, then exits QEMU
+        # deterministically via isa-debug-exit. Times out (and fails) if the
+        # kernel never reaches the success exit.
+        run: timeout 60 cargo run --features qemu-test -- --headless-test
+
+      - name: Run expected page-fault test
+        # Same as above, plus a deliberate page fault after the timer test;
+        # the handler matches it against the expected faulting address and
+        # exits successfully instead of halting.
+        run: timeout 60 cargo run --features "qemu-test fault-tests" -- --headless-test
