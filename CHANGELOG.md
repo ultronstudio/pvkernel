@@ -6,6 +6,88 @@ claiming strict compliance.
 
 ## [Unreleased]
 
+## [0.0.6] - Userspace Entry and Syscall Foundation
+
+### Added
+
+* Dedicated ring-3 (CPL3) code/data GDT descriptors
+  (`kernel::arch::x86_64::gdt::user_code_selector` /
+  `user_data_selector`) and a dedicated, writable TSS.RSP0
+  ring-transition kernel stack (`gdt::syscall_stack_top`), verified
+  writable at boot the same way the double-fault IST stack already is.
+* The first CPL0 → CPL3 transition
+  (`kernel::arch::x86_64::userspace::enter::enter_user_mode`), built by
+  hand-constructing an `iretq` stack frame and zeroing every
+  general-purpose register beforehand so no kernel value ever leaks into
+  userspace.
+* A minimal, provisional, scalar-only `int 0x80` syscall ABI
+  (`kernel::arch::x86_64::syscall`): `RAX` holds the syscall number on
+  entry and the result on return (bit 63 set marks an error, see
+  `syscall::error::SyscallError`); arguments are passed in
+  `RDI`/`RSI`/`RDX`/`R10`/`R8`/`R9`. Implemented via a naked-asm entry
+  stub (`syscall::entry::pvkernel_syscall_entry_stub`) that builds a
+  `SyscallFrame` on the RSP0 stack and calls a Rust-side dispatcher
+  (`syscall::dispatch::pvkernel_syscall_dispatch`), rather than
+  `SYSCALL`/`SYSRET`, which remain out of scope for this milestone.
+* Two documented, always-compiled bootstrap syscalls
+  (`syscall::numbers::ABI_VERSION_QUERY`, `DEBUG_WRITE_BYTE`) plus a
+  `TIMER_TICKS` query, and a small set of test-only syscalls under the
+  `userspace-test` feature.
+* `Permissions::USER_DATA` and `Permissions::USER_CODE`
+  (`kernel::arch::x86_64::memory::paging`), reusing the existing W^X
+  mapping API - a user code page is populated writable+non-executable,
+  then switched to read-only+executable, and is never both at once.
+* Three hand-written assembly test payloads and matching deterministic,
+  headless QEMU tests, each behind its own Cargo feature
+  (`userspace-syscall-test`, `userspace-privilege-fault-test`,
+  `userspace-supervisor-fault-test`, all implying the base
+  `userspace-test` feature): a CPL3 syscall-boundary test (exercises an
+  unknown syscall number, `ABI_VERSION_QUERY`, `DEBUG_WRITE_BYTE`,
+  confirms a PIT tick can interrupt and resume CPL3 execution, then
+  exits via a test-only `TEST_EXIT` syscall); a CPL3 privilege-instruction
+  fault test (`cli` at CPL3 raises `#GP`, matched by the general
+  protection fault handler); and a CPL3 supervisor-page fault test (a
+  CPL3 read of a mapped-but-supervisor-only page raises `#PF`, matched by
+  the page fault handler).
+* CPL-origin diagnostics in the general-protection-fault and page-fault
+  handlers (`kernel::arch::x86_64::interrupts`), logging whether the
+  fault originated at CPL0 or CPL3.
+* New documentation:
+  [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md),
+  [docs/architecture/syscalls.md](docs/architecture/syscalls.md), and
+  [docs/development/userspace-testing.md](docs/development/userspace-testing.md).
+* CI coverage for all three new `userspace-*-test` features (build, and
+  build+run under `qemu-test`).
+
+### Changed
+
+* The root runner's window title is now `pvKernel 0.0.6`.
+* [ROADMAP.md](ROADMAP.md)'s 0.0.6 milestone is redefined as "Userspace
+  Entry and Syscall Foundation" (previously "Kernel Heap and Rust `alloc`
+  Support"); the kernel heap moves to 0.0.7, the scheduler to 0.0.8, and
+  the standalone "Ring 3 and System Calls" milestone previously planned
+  for 0.0.8 is folded into 0.0.9 alongside the ELF loader, since this
+  release already provides the ring-3/syscall foundation. See
+  [ROADMAP.md](ROADMAP.md#006--userspace-entry-and-syscall-foundation)
+  for the full reordering rationale.
+
+### Known limitations
+
+* No `SYSCALL`/`SYSRET` - only the software-interrupt `int 0x80` path is
+  implemented.
+* No process model, no threads, no scheduler: userspace execution in this
+  milestone exists solely to exercise the CPL0 → CPL3 transition and the
+  bootstrap syscall ABI in a deterministic test, not to run general
+  programs.
+* No ELF loader - the three test payloads are hand-written machine code,
+  not compiled or loaded from a binary format.
+* No `copy_from_user`/`copy_to_user` or any user-pointer dereferencing by
+  kernel code; every current syscall argument is treated as an opaque
+  scalar.
+* The supervisor-page-fault test's probe address is baked into the test
+  payload as a raw immediate, kept in sync with the Rust-side constant
+  only by a compile-time assertion, rather than patched at runtime.
+
 ## [0.0.5] - Virtual Memory Foundation
 
 ### Added
@@ -70,7 +152,9 @@ for detail)
 
 * The physical frame allocator is monotonic only: frames returned by
   `unmap_page` are not returned to any allocator and cannot be reused.
-* No kernel heap or Rust `alloc` support yet (planned for 0.0.6).
+* No kernel heap or Rust `alloc` support yet (now planned for 0.0.7; see
+  the [0.0.6](#006---userspace-entry-and-syscall-foundation) entry above
+  for the reordering).
 * No guard pages.
 * No dedicated write-protection (CR0.WP) boot-time test, even though
   read-only mappings are already supported and exercised as part of the

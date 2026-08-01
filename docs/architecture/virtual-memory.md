@@ -24,6 +24,14 @@ frame deallocation/reuse, userspace execution, system calls, or an ELF
 loader. It does not create any user-accessible or executable mapping
 itself. These remain future roadmap items; see [ROADMAP.md](../../ROADMAP.md).
 
+> **0.0.6 update:** `arch::x86_64::userspace` (0.0.6) is the first code to
+> actually use `USERSPACE_RANGE_BASE` and `Permissions::USER_DATA`/
+> `USER_CODE` below, and the first to execute ring-3 code and a minimal
+> `int 0x80` syscall ABI - see
+> [docs/architecture/userspace-entry.md](userspace-entry.md) and
+> [docs/architecture/syscalls.md](syscalls.md). The rest of this document
+> otherwise still describes the 0.0.5 memory foundation accurately.
+
 ## Canonical addresses and paging mode
 
 x86_64 requires virtual addresses to be in canonical form: bits 63:47 must
@@ -208,10 +216,12 @@ enums: `NonCanonicalAddress`, `Unaligned`, `AlreadyMapped`, `NotMapped`,
   (`Translation::NotMapped`) before mapping it, so an unexpected collision
   with a bootloader-chosen dynamic mapping fails loudly (a panic) instead of
   silently corrupting memory.
-* `memory::USERSPACE_RANGE_BASE` (`0x0000_6000_0000_0000`) is a **policy
-  reservation only**: pvKernel 0.0.5 does not populate, map, or otherwise
-  use this range. It exists so the eventual userspace address range is
-  decided once, ahead of the milestone that actually needs it.
+* `memory::USERSPACE_RANGE_BASE` (`0x0000_6000_0000_0000`) was a **policy
+  reservation only** as of 0.0.5: that release did not populate, map, or
+  otherwise use this range. Starting in 0.0.6,
+  `arch::x86_64::userspace` maps its (test-only) code, guard, and stack
+  pages within it; see
+  [docs/architecture/userspace-entry.md](userspace-entry.md).
 
 ## Guard pages and huge-page policy
 
@@ -239,8 +249,15 @@ in preparation for eventual SMP support.
 pvKernel 0.0.5 does not execute ring-3 code, does not load pvOS executables
 or any ELF binary, and does not define a stable syscall ABI. Every mapping
 created in this milestone is supervisor-only and is created either by the
-boot-time smoke test or the optional post-unmap fault test — there is no
+boot-time smoke test or the optional post-unmap fault test - there is no
 general-purpose "map memory for a subsystem" caller yet.
+
+> Starting in 0.0.6, `arch::x86_64::userspace` (test-only, behind Cargo
+> features) does execute ring-3 code and a minimal, provisional `int 0x80`
+> syscall ABI - see [docs/architecture/userspace-entry.md](userspace-entry.md)
+> and [docs/architecture/syscalls.md](syscalls.md). There is still no ELF
+> loader, no process model, and no general-purpose "map memory for a
+> subsystem" caller.
 
 ## Boot-time tests
 
@@ -251,7 +268,8 @@ test verify, and how to run them.
 ## Future work and known limitations
 
 * No frame deallocation/reuse — `BootFrameAllocator` is monotonic only.
-* No kernel heap or Rust `alloc` support (planned for 0.0.6).
+* No kernel heap or Rust `alloc` support (now planned for 0.0.7; see
+  [ROADMAP.md](../../ROADMAP.md)).
 * No guard pages (nothing yet needs a growable, guarded region).
 * No write-protection (CR0.WP) boot-time test — read-only enforcement is
   implemented (`update_permissions`/`KERNEL_READ_ONLY`) but not exercised

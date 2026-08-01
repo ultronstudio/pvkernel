@@ -85,8 +85,16 @@ example, an IDT vector left unhandled, or a masked/unmasked IRQ line
 mismatch causing the timer test to hang) — the timeout guarantees such a
 regression fails the run instead of hanging CI indefinitely.
 
+See [docs/development/memory-testing.md](memory-testing.md) for the
+`mem-fault-tests` post-unmap page-fault test, and
+[docs/development/userspace-testing.md](userspace-testing.md) for the three
+0.0.6 userspace boundary tests (`userspace-syscall-test`,
+`userspace-privilege-fault-test`, `userspace-supervisor-fault-test`), which
+build on this same mechanism.
+
 ## CI integration
 
 `.github/workflows/ci.yml`'s `qemu-tests` job installs `qemu-system-x86` and
-runs both commands above on every pull request and push to `main`, in
-addition to the `check` job's formatting and build verification.
+runs the timer, fault, memory, and userspace tests described above on every
+pull request and push to `main`, in addition to the `check` job's
+formatting and build verification.
