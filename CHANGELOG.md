@@ -6,7 +6,7 @@ claiming strict compliance.
 
 ## [Unreleased]
 
-## [0.0.2] - Pending
+## [0.0.2] - 2026-08-01
 
 ### Added
 
