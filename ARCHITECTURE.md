@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.4. It does not describe planned or aspirational architecture; see
+version 0.0.5. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
@@ -12,12 +12,15 @@ UEFI firmware (OVMF)
         ▼
 rust-osdev bootloader (external crate, not part of pvKernel)
         │  loads the pvKernel ELF, exits UEFI boot services,
-        │  builds an initial page table mapping, and passes BootInfo
+        │  builds an initial page table mapping (incl. a physical-memory
+        │  offset mapping), and passes BootInfo
         ▼
 pvKernel ELF (kernel_main)
         │
         ├── drivers::serial   – COM1 UART diagnostics (kprint!/kprintln!)
         ├── arch::x86_64      – GDT, TSS, IDT, exception + IRQ handlers, PIC, PIT
+        ├── arch::x86_64::memory – physical frame allocator, active page table
+        │                          access, map/unmap/permission operations
         ├── graphics::framebuffer – centered blue "P" logo
         └── halt              – fatal halt vs. interrupt-enabled idle loop
 ```
@@ -33,8 +36,9 @@ pvKernel ELF (kernel_main)
   page table mapping.
 * **pvKernel**: everything from `kernel_main` onward. This includes serial
   diagnostics, the GDT/TSS, the IDT and its exception/IRQ handlers, the
-  legacy 8259 PIC and PIT drivers, and framebuffer rendering.
-* **Future pvOS userspace**: not present in 0.0.4. Ring 3 execution, system
+  legacy 8259 PIC and PIT drivers, the physical frame allocator and active
+  page-table access, and framebuffer rendering.
+* **Future pvOS userspace**: not present in 0.0.5. Ring 3 execution, system
   calls, and userspace loading are future roadmap items (see
   [ROADMAP.md](ROADMAP.md)); pvKernel does not currently support them.
 
@@ -43,7 +47,7 @@ pvKernel ELF (kernel_main)
 1. `kernel_main` receives `BootInfo` from the bootloader.
 2. Serial diagnostics are printed (COM1, `drivers::serial`).
 3. The boot memory map is summarized.
-4. `arch::init()` runs, in this exact order:
+4. `arch::init(boot_info)` runs, in this exact order:
    1. Maskable hardware interrupts are disabled
       (`x86_64::instructions::interrupts::disable()`).
    2. The kernel-owned GDT and TSS are built and loaded
@@ -52,24 +56,39 @@ pvKernel ELF (kernel_main)
       including handlers for all 16 remapped IRQ vectors (32-47). This must
       happen after the GDT/TSS, because the double-fault entry references an
       IST index that is only meaningful once the TSS is active.
-   4. The legacy 8259 PIC is remapped to vectors 32-47
+   4. The physical frame allocator and active page-table access are
+      initialized (`arch::x86_64::memory::init`). This must happen after
+      the IDT, so a page fault occurring during memory initialization is
+      still handled, and before the PIC/PIT, so no other subsystem can
+      create page-table mappings first; see
+      [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md).
+   5. The legacy 8259 PIC is remapped to vectors 32-47
       (`arch::x86_64::pic::initialize`), then every IRQ line is masked
       (`pic::mask_all`).
-   5. PIT channel 0 is configured as a periodic timer at approximately
+   6. PIT channel 0 is configured as a periodic timer at approximately
       100 Hz (`arch::x86_64::pit::initialize`).
-5. The framebuffer is rendered (`graphics::framebuffer`), unchanged from
+5. A boot-time memory smoke test verifies the mapping foundation (map,
+   translate, write/read, change permissions, unmap, re-translate); see
+   [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
+   and
+   [docs/development/memory-testing.md](docs/development/memory-testing.md).
+6. The framebuffer is rendered (`graphics::framebuffer`), unchanged from
    0.0.1: dark background, centered blue `P` (`#00B7EF`).
-6. A controlled `int3` breakpoint test verifies the IDT is functioning and
+7. A controlled `int3` breakpoint test verifies the IDT is functioning and
    execution resumes correctly.
-7. A boot-time timer verification unmasks PIT IRQ0, enables maskable
+8. A boot-time timer verification unmasks PIT IRQ0, enables maskable
    hardware interrupts, and confirms the tick counter advances (see
    [docs/architecture/timer.md](docs/architecture/timer.md)).
-8. If the `fault-tests` Cargo feature is enabled, a deliberate page fault is
+9. If the `fault-tests` Cargo feature is enabled, a deliberate page fault is
    triggered and matched against its expected faulting address.
-9. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
-   the `qemu-test` Cargo feature is enabled, in which case QEMU exits
-   deterministically instead (see
-   [docs/development/testing.md](docs/development/testing.md)).
+10. If the `mem-fault-tests` Cargo feature is enabled, a temporary page is
+    mapped, written to, unmapped, and deliberately re-accessed, matching the
+    resulting page fault against its expected address (see
+    [docs/development/memory-testing.md](docs/development/memory-testing.md)).
+11. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
+    the `qemu-test` Cargo feature is enabled, in which case QEMU exits
+    deterministically instead (see
+    [docs/development/testing.md](docs/development/testing.md)).
 
 ## Hardware interrupts in 0.0.4
 
@@ -101,6 +120,27 @@ duration, loaded once, and never replaced during the kernel's lifetime.
 also stored in a `spin::Once` cell, installed after the GDT/TSS. See
 [docs/architecture/interrupts.md](docs/architecture/interrupts.md) for
 handler-level detail.
+
+## Memory ownership
+
+`arch::x86_64::memory` owns:
+
+* `BootFrameAllocator` — a monotonic physical frame allocator built once
+  from the bootloader's memory map;
+* `KernelAddressSpace` — the single active x86_64 page table (an
+  `OffsetPageTable` over the CR3-resident level-4 table, reached through the
+  bootloader's physical-memory offset mapping), paired with the frame
+  allocator.
+
+Both are stored together behind a `spin::Mutex`, itself behind a
+`spin::Once`, and are reachable only through
+`memory::with_kernel_address_space`, which disables maskable hardware
+interrupts for the duration of the call. This mirrors the GDT/TSS and IDT's
+`spin::Once`-backed, install-once ownership pattern above. See
+[docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
+for the full design, including the safety invariants for reconstructing the
+active page table and the permission (W^X) model enforced by every mapping
+operation.
 
 ## Fatal exception behavior
 

@@ -6,6 +6,78 @@ claiming strict compliance.
 
 ## [Unreleased]
 
+## [0.0.5] - Virtual Memory Foundation
+
+### Added
+
+* A monotonic boot-time physical frame allocator
+  (`kernel::arch::x86_64::memory::frame_allocator::BootFrameAllocator`),
+  built from the bootloader-provided memory map.
+* Safe, narrowly-scoped access to the single active x86_64 page table
+  (`kernel::arch::x86_64::memory::address_space::KernelAddressSpace`),
+  reachable only through `memory::with_kernel_address_space`, which holds a
+  `spin::Mutex` with maskable hardware interrupts disabled.
+* 4 KiB map / unmap / permission-change / translate operations
+  (`kernel::arch::x86_64::memory::paging`), with a project-specific
+  `MemoryError` type covering non-canonical addresses, misalignment,
+  already-mapped/not-mapped pages, frame-allocation failure, parent
+  huge-page conflicts, invalid permission combinations, and invalid frame
+  addresses.
+* A W^X permission model (`Permissions`) enforced by the mapping API
+  itself: requesting a writable-and-executable mapping is rejected before
+  any page-table entry is touched.
+* Runtime verification (not just assumption) of the current paging mode
+  (4-level vs. 5-level) and whether EFER.NXE is active.
+* A custom `BootloaderConfig` in `kernel/src/main.rs` requesting a
+  physical-memory offset mapping (`mappings.physical_memory =
+  Some(Mapping::Dynamic)`), required for page-table access; this was not
+  previously requested, so `BootInfo::physical_memory_offset` was
+  previously always `None`.
+* A boot-time mapping smoke test (`memory::run_boot_smoke_test`), run
+  unconditionally on every boot: rejects a non-canonical address, maps a
+  temporary page, verifies its translation and flags, writes and reads
+  back a sentinel value, changes it to read-only, unmaps it, and confirms
+  it translates as unmapped again.
+* An optional deterministic post-unmap page-fault test
+  (`memory::run_unmap_fault_test`, behind the new `mem-fault-tests` Cargo
+  feature), mirroring the existing `fault-tests` page-fault test: maps,
+  writes, unmaps, then deliberately re-accesses a page, and (under
+  `qemu-test`) exits QEMU successfully once the resulting fault is matched.
+* New documentation:
+  [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
+  and
+  [docs/development/memory-testing.md](docs/development/memory-testing.md).
+* CI coverage for the `mem-fault-tests` feature (build) and the combined
+  `qemu-test mem-fault-tests` headless test (build and run).
+
+### Changed
+
+* `arch::x86_64::init` now takes `&mut BootInfo` and initializes the memory
+  subsystem between the IDT and the PIC, so a page fault during memory
+  initialization is still handled, and no other subsystem can create
+  page-table mappings first.
+* The root runner's window title is now `pvKernel 0.0.5`.
+* [ROADMAP.md](ROADMAP.md)'s 0.0.5 milestone is redefined as "Virtual
+  Memory Foundation" (previously "Physical Memory Allocator"), combining
+  frame allocation and page-table access into a single milestone based on
+  implementation experience; 0.0.6 is redefined as "Kernel Heap and Rust
+  `alloc` Support" (previously "Virtual Memory and Kernel Heap", since
+  page-table access moved to 0.0.5).
+
+### Known limitations (see
+[docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md#future-work-and-known-limitations)
+for detail)
+
+* The physical frame allocator is monotonic only: frames returned by
+  `unmap_page` are not returned to any allocator and cannot be reused.
+* No kernel heap or Rust `alloc` support yet (planned for 0.0.6).
+* No guard pages.
+* No dedicated write-protection (CR0.WP) boot-time test, even though
+  read-only mappings are already supported and exercised as part of the
+  smoke test.
+* No SMP-aware locking beyond disabling interrupts plus a `spin::Mutex`
+  (correct for pvKernel's current single-CPU operation only).
+
 ## [0.0.4] - 2026-08-01
 
 ### Added

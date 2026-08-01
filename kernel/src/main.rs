@@ -7,6 +7,7 @@ mod drivers;
 mod graphics;
 mod halt;
 
+use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
@@ -15,7 +16,22 @@ use arch::x86_64::pit;
 #[cfg(not(feature = "qemu-test"))]
 use halt::{halt_forever, idle_loop};
 
-entry_point!(kernel_main);
+/// Requests a physical-memory offset mapping from the bootloader
+/// (`BootInfo::physical_memory_offset`), which `arch::x86_64::memory` needs
+/// to access the active page table (see [`arch::x86_64::memory::init`]).
+/// The bootloader picks the actual virtual range dynamically at boot time;
+/// pvKernel does not otherwise change the bootloader's default virtual
+/// memory layout (kernel, stack, framebuffer, and boot-info mappings all
+/// keep their default `Mapping::Dynamic` placement).
+const fn bootloader_config() -> BootloaderConfig {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config
+}
+
+static BOOTLOADER_CONFIG: BootloaderConfig = bootloader_config();
+
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// Minimum number of timer ticks the boot-time test waits for; five repeated
 /// ticks prove that the PIT keeps raising IRQ0, the PIC keeps delivering
@@ -26,7 +42,7 @@ const TIMER_TEST_TICKS: u64 = 5;
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kprintln!();
     kprintln!("========================================");
-    kprintln!("pvKernel 0.0.4");
+    kprintln!("pvKernel 0.0.5");
     kprintln!("Architecture: x86_64");
     kprintln!("Boot mode: UEFI");
     kprintln!("========================================");
@@ -43,7 +59,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         usable_memory / 1024 / 1024
     );
 
-    arch::init();
+    arch::init(boot_info);
+
+    arch::x86_64::memory::run_boot_smoke_test();
 
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
         let info = framebuffer.info();
@@ -97,7 +115,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "fault-tests")]
     arch::x86_64::interrupts::run_page_fault_test();
 
-    kprintln!("pvKernel 0.0.4 initialized");
+    #[cfg(feature = "mem-fault-tests")]
+    arch::x86_64::memory::run_unmap_fault_test();
+
+    kprintln!("pvKernel 0.0.5 initialized");
     kprintln!("entering interrupt-enabled idle loop");
 
     #[cfg(feature = "qemu-test")]

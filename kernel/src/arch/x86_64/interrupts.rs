@@ -6,6 +6,8 @@ use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use super::gdt::DOUBLE_FAULT_IST_INDEX;
+#[cfg(feature = "qemu-test")]
+use super::memory;
 use super::pic::{self, IrqLine};
 #[cfg(feature = "qemu-test")]
 use super::qemu;
@@ -146,6 +148,16 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     let faulting_address = Cr2::read_raw();
+
+    #[cfg(feature = "qemu-test")]
+    if memory::take_expected_unmap_fault_if_matches(faulting_address, error_code) {
+        kprintln!("[exception] page fault");
+        kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("error code: {:?}", error_code);
+        kprintln!("{:#?}", stack_frame);
+        kprintln!("[test] expected post-unmap page fault matched");
+        qemu::exit_success();
+    }
 
     #[cfg(feature = "qemu-test")]
     if EXPECTED_PAGE_FAULT.load(Ordering::Relaxed)
