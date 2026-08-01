@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.4` — Hardware Interrupts and Timer
+Version: `0.0.5` — Virtual Memory Foundation
 
 Implemented:
 
@@ -33,6 +33,12 @@ Implemented:
 * IDT handlers for all 16 remapped IRQ vectors, with a boot-time verification
   that maskable hardware interrupts are safely enabled and timer ticks are
   delivered
+* a monotonic physical frame allocator built from the bootloader memory map
+* safe, narrowly-scoped access to the active x86_64 page table
+* 4 KiB map/unmap/permission-change/translate operations with a W^X
+  permission model
+* a boot-time memory smoke test and an optional post-unmap page-fault test
+  behind the `mem-fault-tests` Cargo feature
 * deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
 * structured serial diagnostics
 * panic handler
@@ -42,9 +48,9 @@ Not implemented:
 
 * APIC initialization
 * keyboard or mouse input
-* physical memory allocator
-* virtual memory manager
+* frame deallocation/reuse (the physical frame allocator is monotonic only)
 * kernel heap or dynamic allocation
+* guard pages
 * processes, threads, or a scheduler
 * user mode or system calls
 * ELF userspace loading
@@ -82,15 +88,30 @@ cargo run --features fault-tests
 See [docs/development/debugging.md](docs/development/debugging.md) for the
 expected output.
 
+## Run the optional post-unmap page-fault test
+
+Maps a temporary page, writes and verifies a sentinel value, unmaps it, and
+deliberately re-accesses it to exercise the page-fault handler's
+not-present classification. Disabled by default:
+
+```bash
+cargo run --features mem-fault-tests
+```
+
+See [docs/development/memory-testing.md](docs/development/memory-testing.md)
+for the expected output.
+
 ## Run the deterministic headless QEMU tests
 
-Verifies PIC/PIT initialization and repeated timer interrupt delivery (and,
-with `fault-tests` also enabled, an expected page fault), then exits QEMU
-with a pass/fail status instead of leaving a graphical window open:
+Verifies PIC/PIT initialization, repeated timer interrupt delivery, and the
+memory-mapping smoke test (and, with `fault-tests`/`mem-fault-tests` also
+enabled, their respective expected page faults), then exits QEMU with a
+pass/fail status instead of leaving a graphical window open:
 
 ```bash
 cargo run --features qemu-test -- --headless-test
 cargo run --features "qemu-test fault-tests" -- --headless-test
+cargo run --features "qemu-test mem-fault-tests" -- --headless-test
 ```
 
 See [docs/development/testing.md](docs/development/testing.md) for details.
@@ -108,7 +129,9 @@ kernel_main
     ├── serial logging
     ├── boot memory map
     ├── x86_64 GDT, TSS and IDT
+    ├── physical frame allocator + active page table
     ├── PIC remap + PIT configuration
+    ├── memory-mapping smoke test
     ├── framebuffer
     ├── controlled breakpoint test
     ├── timer interrupt verification
@@ -129,11 +152,15 @@ services are implemented by pvKernel itself. See
 * [docs/architecture/hardware-interrupts.md](docs/architecture/hardware-interrupts.md) —
   legacy 8259 PIC driver
 * [docs/architecture/timer.md](docs/architecture/timer.md) — PIT timer driver
+* [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md) —
+  physical/virtual memory foundation
 * [docs/development/build.md](docs/development/build.md) — build environment
 * [docs/development/debugging.md](docs/development/debugging.md) —
   debugging and diagnostics
 * [docs/development/testing.md](docs/development/testing.md) —
   deterministic headless QEMU tests
+* [docs/development/memory-testing.md](docs/development/memory-testing.md) —
+  memory subsystem boot-time tests
 * [docs/dependencies.md](docs/dependencies.md) — direct dependency review
 * [ROADMAP.md](ROADMAP.md) — planned milestones
 * [CHANGELOG.md](CHANGELOG.md) — release history

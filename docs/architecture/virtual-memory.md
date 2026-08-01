@@ -1,0 +1,264 @@
+# Virtual memory foundation
+
+This document describes pvKernel 0.0.5's physical/virtual memory foundation:
+how physical frames are tracked, how the active page table is reached and
+mutated, the permission model it enforces, and what is deliberately not yet
+implemented. It complements [ARCHITECTURE.md](../../ARCHITECTURE.md), which
+covers overall kernel structure and boot order.
+
+## Scope
+
+pvKernel 0.0.5 adds:
+
+* a monotonic boot-time physical frame allocator built from the
+  bootloader-provided memory map;
+* safe access to the single active x86_64 page table, through a narrow
+  unsafe boundary;
+* 4 KiB map / unmap / permission-change / translate operations;
+* a W^X permission model enforced by the mapping API itself;
+* a boot-time smoke test and an optional deterministic post-unmap
+  page-fault test.
+
+pvKernel 0.0.5 does **not** implement a kernel heap, Rust `alloc` support,
+frame deallocation/reuse, userspace execution, system calls, or an ELF
+loader. It does not create any user-accessible or executable mapping
+itself. These remain future roadmap items; see [ROADMAP.md](../../ROADMAP.md).
+
+## Canonical addresses and paging mode
+
+x86_64 requires virtual addresses to be in canonical form: bits 63:47 must
+all be identical (a sign extension of bit 47). pvKernel validates this with
+`x86_64::VirtAddr::try_new` (wrapped as
+`memory::paging::canonical_virt_addr`) before performing any address-based
+operation, rather than relying on `VirtAddr::new`'s panic-on-invalid-input
+behavior.
+
+pvKernel does not enable five-level paging (CR4.LA57); the bootloader
+configures standard 4-level paging, which pvKernel verifies at boot
+(`memory::five_level_paging_active`) rather than assuming.
+
+## Bootloader-established mappings
+
+The `rust-osdev` bootloader builds the initial page table before jumping to
+`kernel_main`, and pvKernel does not replace it — only adds to it. As of
+0.0.5, `kernel/src/main.rs` requests one additional mapping through a
+custom `BootloaderConfig`:
+
+```rust
+let mut config = BootloaderConfig::new_default();
+config.mappings.physical_memory = Some(Mapping::Dynamic);
+```
+
+This maps all usable physical memory at a bootloader-chosen virtual offset
+(`BootInfo::physical_memory_offset`), which is required for
+`OffsetPageTable` to translate page-table frame addresses into accessible
+virtual addresses. Without it, `arch::x86_64::memory` has no way to reach
+the active page table at all. All other default mappings (kernel image,
+kernel stack, boot info, framebuffer) keep the bootloader's default dynamic
+placement; pvKernel does not currently change or rely on their specific
+addresses.
+
+## Physical frame allocator (`frame_allocator::BootFrameAllocator`)
+
+`BootFrameAllocator` is a monotonic allocator built once from the
+bootloader's `MemoryRegions`: it filters regions of kind
+`MemoryRegionKind::Usable`, aligns each region's usable range to 4 KiB frame
+boundaries, and hands out frames from that iterator in order via
+`FrameAllocator<Size4KiB>::allocate_frame`.
+
+**Limitations, by design in this milestone:**
+
+* frames are never returned or reused — `unmap_page` returns the physical
+  frame to the caller, but nothing hands it back to the allocator;
+* only 4 KiB frames are allocated; pvKernel never creates 2 MiB/1 GiB huge
+  pages itself;
+* allocation is `O(n)` in the number of already-allocated frames (`Iterator::nth`
+  re-walks the usable-region iterator each call) — acceptable for boot-time
+  and test-scale allocation counts in this milestone, not tuned for a
+  general-purpose allocator workload.
+
+A real deallocating/reusable allocator (e.g. a free-list or bitmap
+allocator) is future work, likely alongside kernel heap support.
+
+## Active page-table access (`address_space::KernelAddressSpace`)
+
+pvKernel owns exactly one `x86_64::structures::paging::OffsetPageTable`,
+constructed from the CR3-resident level-4 table plus the physical-memory
+offset mapping described above. It is stored, together with the
+`BootFrameAllocator`, inside a single `KernelAddressSpace` behind a
+`spin::Mutex`, itself behind a `spin::Once`:
+
+```rust
+static KERNEL_ADDRESS_SPACE: Once<Mutex<KernelAddressSpace>> = Once::new();
+```
+
+The only way to reach it is `memory::with_kernel_address_space(f)`, which
+runs `f` with the lock held and hardware interrupts disabled
+(`x86_64::instructions::interrupts::without_interrupts`), so an interrupt
+handler can never observe or contend for a half-updated page table on the
+same CPU. pvKernel is currently single-CPU (no SMP/AP bring-up), so this is
+sufficient; a future SMP milestone would need to revisit this (see
+[Future work](#future-work-and-known-limitations)).
+
+### `active_level_4_table` safety invariants
+
+Reconstructing `&'static mut PageTable` from the physical address in CR3
+requires four invariants, documented at its definition
+(`address_space.rs`):
+
+1. **A valid physical-memory mapping exists.** Guaranteed by requesting
+   `Mapping::Dynamic` for `physical_memory` in the bootloader config (see
+   above); `memory::init` panics loudly if the mapping is absent instead of
+   dereferencing a bogus offset.
+2. **The CR3 frame is reachable through that mapping.** True by
+   construction: the physical-memory mapping covers all usable physical
+   memory, and CR3 always points at a real, currently-active page-table
+   frame.
+3. **No other `&mut` reference to the same table exists concurrently.**
+   Enforced by only ever constructing this reference once, at
+   `memory::init` time, and storing the resulting `OffsetPageTable` (which
+   owns that reference) inside the single, lock-protected
+   `KERNEL_ADDRESS_SPACE`. No other code path re-derives a fresh reference
+   from CR3.
+4. **The reference does not outlive the mapping.** The physical-memory
+   mapping is permanent for the kernel's lifetime (the bootloader never
+   unmaps it), so a `'static` reference is sound.
+
+## Permission model (`paging::Permissions`) and W^X
+
+Every mapping created through this module specifies:
+
+```rust
+pub struct Permissions {
+    pub writable: bool,
+    pub executable: bool,
+    pub user_accessible: bool,
+}
+```
+
+with `KERNEL_DATA` (writable, non-executable), `KERNEL_READ_ONLY`
+(read-only, non-executable), and `KERNEL_EXECUTABLE` (read-only,
+executable) constants. `Permissions::to_flags` **refuses** to produce a
+mapping that is both `writable` and `executable`: this is pvKernel's W^X
+policy, enforced at the point flags are computed, not left to caller
+discipline. Attempting it returns `MemoryError::InvalidPermissions` instead
+of silently producing an insecure mapping.
+
+Mappings are supervisor-only (`USER_ACCESSIBLE` unset) unless
+`user_accessible` is explicitly requested, and non-executable
+(`NO_EXECUTE` set) unless `executable` is explicitly requested — the
+default shape of any mapping is the most restrictive one.
+
+`KERNEL_EXECUTABLE` exists for a future milestone (there is no ELF loader
+yet, so pvKernel 0.0.5 never actually creates an executable mapping
+itself); it is already part of the model so a later milestone does not need
+to redesign the permission type.
+
+## NX (`EFER.NXE`)
+
+pvKernel's bootloader (`bootloader-x86_64-common`) already sets
+`EFER.NXE` before jumping to `kernel_main`, which is what makes the
+page-table `NO_EXECUTE` bit meaningful. `memory::init` verifies this at
+runtime (`Efer::read().contains(EferFlags::NO_EXECUTE_ENABLE)`) and logs
+the result, rather than assuming it or re-enabling it itself.
+
+## Address translation (`paging::translate`)
+
+`translate(mapper, addr)` returns a `Translation`:
+
+* `Mapped { phys_addr, flags }` — an ordinary 4 KiB mapping;
+* `HugePage { phys_addr }` — mapped through a 2 MiB/1 GiB huge page (never
+  created by pvKernel itself, but distinguished in case the bootloader's
+  own mappings use one);
+* `NotMapped` — no translation exists;
+* `Unsupported` — the page-table entry pointed at an invalid physical
+  address.
+
+Like `canonical_virt_addr`, this never panics on an ordinary unmapped
+address — callers get a typed result instead.
+
+## Map / unmap operations (`paging::map_page` / `paging::unmap_page` / `paging::update_permissions`)
+
+* `map_page` allocates any missing intermediate page-table levels from the
+  supplied frame allocator, maps a single 4 KiB page to a single 4 KiB
+  frame with the requested `Permissions`, and flushes the mapped page's TLB
+  entry.
+* `unmap_page` unmaps a page, flushes its TLB entry, and returns the
+  physical frame it was mapped to. As noted above, the frame is **not**
+  returned to any allocator — callers must not treat it as reusable in this
+  milestone.
+* `update_permissions` changes the flags of an existing mapping and
+  flushes its TLB entry. It never sets the `GLOBAL` flag, so there is no
+  cross-CPU TLB-shootdown requirement to uphold (relevant only once SMP
+  exists).
+
+All three return a project-specific `MemoryError` (not the raw `x86_64`
+crate error types) so callers do not need to match on multiple upstream
+enums: `NonCanonicalAddress`, `Unaligned`, `AlreadyMapped`, `NotMapped`,
+`FrameAllocationFailed`, `ParentEntryHugePage`, `InvalidPermissions`, and
+`InvalidFrameAddress`.
+
+## Temporary mapping range and userspace reservation
+
+* `memory::TEMP_MAPPING_BASE` (`0xFFFF_9000_0000_0000`) is a canonical,
+  page-aligned virtual address pvKernel's own boot-time tests use for
+  scratch mappings. It is **internal and unstable**: nothing outside this
+  module's tests may assume it stays at this address across releases. Every
+  test using it first confirms the address is unmapped
+  (`Translation::NotMapped`) before mapping it, so an unexpected collision
+  with a bootloader-chosen dynamic mapping fails loudly (a panic) instead of
+  silently corrupting memory.
+* `memory::USERSPACE_RANGE_BASE` (`0x0000_6000_0000_0000`) is a **policy
+  reservation only**: pvKernel 0.0.5 does not populate, map, or otherwise
+  use this range. It exists so the eventual userspace address range is
+  decided once, ahead of the milestone that actually needs it.
+
+## Guard pages and huge-page policy
+
+pvKernel 0.0.5 does not create guard pages (there is no growable kernel
+stack or heap yet to guard) and never creates a huge-page (2 MiB/1 GiB)
+mapping itself. If a caller's page happens to fall under a parent
+page-table entry that is already part of a huge page (for example, one of
+the bootloader's own mappings), `map_page`/`unmap_page`/`update_permissions`
+return `MemoryError::ParentEntryHugePage` rather than corrupting or
+silently reinterpreting that mapping.
+
+## Concurrency and interrupt assumptions
+
+`with_kernel_address_space` disables maskable hardware interrupts for the
+duration of the closure and holds a `spin::Mutex`. This is sufficient
+because pvKernel 0.0.5 is single-CPU: there is no AP (application
+processor) bring-up, so there is no possibility of true concurrent access
+from another core. The `spin::Mutex` primarily guards against reentrancy
+from an interrupt handler on the *same* CPU (which `without_interrupts`
+already prevents) and keeps the API honest about being a shared resource,
+in preparation for eventual SMP support.
+
+## What pvKernel 0.0.5 does not execute
+
+pvKernel 0.0.5 does not execute ring-3 code, does not load pvOS executables
+or any ELF binary, and does not define a stable syscall ABI. Every mapping
+created in this milestone is supervisor-only and is created either by the
+boot-time smoke test or the optional post-unmap fault test — there is no
+general-purpose "map memory for a subsystem" caller yet.
+
+## Boot-time tests
+
+See [docs/development/memory-testing.md](../development/memory-testing.md)
+for what the boot-time smoke test and the optional post-unmap page-fault
+test verify, and how to run them.
+
+## Future work and known limitations
+
+* No frame deallocation/reuse — `BootFrameAllocator` is monotonic only.
+* No kernel heap or Rust `alloc` support (planned for 0.0.6).
+* No guard pages (nothing yet needs a growable, guarded region).
+* No write-protection (CR0.WP) boot-time test — read-only enforcement is
+  implemented (`update_permissions`/`KERNEL_READ_ONLY`) but not exercised
+  by a dedicated "write to a read-only page faults" deterministic test in
+  this milestone; that is left as explicit future work rather than
+  expanding this milestone's QEMU test surface further.
+* No SMP-aware locking beyond `without_interrupts` + `spin::Mutex` (correct
+  for a single CPU; would need revisiting for multi-core support).
+* No huge-page creation, and no support for unmapping/remapping a range
+  that spans multiple page sizes.

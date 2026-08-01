@@ -40,14 +40,27 @@ added in this milestone.
 APIC support, keyboard input, and any other IRQ line beyond the timer are
 out of scope for this milestone and remain future roadmap items.
 
-## 0.0.5 — Physical Memory Allocator
+## 0.0.5 — Virtual Memory Foundation
 
-* parsing the bootloader-provided memory map into a frame allocator
-* frame allocation and deallocation primitives
+* parsing the bootloader-provided memory map into a monotonic physical
+  frame allocator
+* safe, narrowly-scoped access to the active x86_64 page table
+* 4 KiB map / unmap / permission-change / translate operations
+* a W^X permission model enforced by the mapping API itself
+* verification of the NX bit and current paging mode
+* a boot-time mapping smoke test and an optional deterministic post-unmap
+  page-fault test
 
-## 0.0.6 — Virtual Memory and Kernel Heap
+> This milestone was expanded from an earlier plan that split "physical
+> memory allocator" (0.0.5) and "virtual memory and kernel heap" (0.0.6)
+> into two releases. Implementation experience showed frame allocation and
+> page-table access are not independently useful, so they are combined
+> here; the kernel heap and `alloc` support move to 0.0.6 below. Frame
+> deallocation/reuse, guard pages, and userspace/user-accessible mappings
+> remain future work.
 
-* kernel-owned page tables
+## 0.0.6 — Kernel Heap and Rust `alloc` Support
+
 * a kernel heap
 * Rust `alloc` support
 

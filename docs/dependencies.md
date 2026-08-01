@@ -33,8 +33,10 @@ committed `Cargo.lock`.
 * **Why external**: it is the shared contract between the `bootloader` crate
   and the kernel; both sides must agree on its layout.
 * **What pvKernel still owns**: interpreting and using the boot information
-  (memory map summarization, framebuffer rendering) is entirely pvKernel
-  code.
+  (memory map summarization, framebuffer rendering, and, since 0.0.5,
+  building the physical frame allocator and requesting the
+  physical-memory offset mapping via a custom `BootloaderConfig`) is
+  entirely pvKernel code.
 * **no_std status**: `no_std`-compatible; used directly in the kernel
   binary.
 * **Replacement boundary**: pinned to the exact same version as the root
@@ -49,14 +51,20 @@ committed `Cargo.lock`.
 * **Purpose**: provides safe or narrowly-scoped-unsafe wrappers over x86_64
   CPU structures and instructions: `GlobalDescriptorTable`,
   `TaskStateSegment`, `InterruptDescriptorTable`, segment register access,
-  `Cr2`, `hlt`/`int3`, and port I/O (`Port`/`PortWriteOnly`) used by the
-  legacy PIC and PIT drivers.
+  `Cr2`, `hlt`/`int3`, port I/O (`Port`/`PortWriteOnly`) used by the legacy
+  PIC and PIT drivers, and, since 0.0.5, `OffsetPageTable`, `PageTable`,
+  `Page`/`PhysFrame`, `PageTableFlags`, the `Mapper`/`Translate`/
+  `FrameAllocator` traits, and `Cr3`/`Cr4`/`Efer` register access used by
+  the memory subsystem.
 * **Why external**: reimplementing these primitives would duplicate a
   well-reviewed, widely used crate without adding value, and would expand
   pvKernel's unsafe surface area for no benefit.
 * **What pvKernel still owns**: how these primitives are assembled — the
   actual GDT/TSS/IDT contents, the double-fault IST stack, all exception and
-  IRQ handler logic, and the PIC/PIT drivers, in `kernel/src/arch/x86_64/`.
+  IRQ handler logic, the PIC/PIT drivers, and, since 0.0.5, the physical
+  frame allocator, the single active `KernelAddressSpace`, and the
+  permission (W^X) model enforced on every mapping, in
+  `kernel/src/arch/x86_64/`.
 * **no_std status**: `no_std`-compatible; this is a foundational crate for
   bare-metal x86_64 development.
 * **Replacement boundary**: pvKernel uses its existing APIs rather than
