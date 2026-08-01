@@ -37,6 +37,7 @@ Closes #
 - [ ] `cargo build` succeeds
 - [ ] Boot tested with `cargo run` (when relevant)
 - [ ] Fault test run with `cargo run --features fault-tests` (when relevant)
+- [ ] Graphical boot logo verified by maintainer (cannot be automated in CI)
 - [ ] Every new `unsafe` block has a `// SAFETY:` comment
 - [ ] No unrelated changes are included
 - [ ] Documentation is updated (when relevant)
