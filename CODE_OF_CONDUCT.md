@@ -51,7 +51,7 @@ for reports or enforcement actions.
 ## Reporting
 
 Reports of code of conduct violations may be sent privately to
-contact@petrvurm.cz. Please do not use this channel to report suspected
+kontakt@petrvurm.cz. Please do not use this channel to report suspected
 security vulnerabilities; see [SECURITY.md](SECURITY.md) for that process,
 and do not use the security-reporting channel for ordinary interpersonal
 disagreements.

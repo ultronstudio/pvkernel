@@ -35,7 +35,7 @@ Use one of the following private reporting methods:
    https://github.com/ultronstudio/pvkernel/security/advisories/new
 
 2. If private vulnerability reporting is unavailable, contact:
-   contact@petrvurm.cz
+   kontakt@petrvurm.cz
 
 Please include as much of the following information as possible:
 
