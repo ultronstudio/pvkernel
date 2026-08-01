@@ -6,7 +6,7 @@ claiming strict compliance.
 
 ## [Unreleased]
 
-## [0.0.4] - Hardware Interrupts and Timer
+## [0.0.4] - 2026-08-01
 
 ### Added
 
