@@ -1,0 +1,72 @@
+name: Feature request
+description: Propose new functionality or a behavior change for pvKernel.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem does this feature solve? What is missing or limiting today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the behavior you would like to see.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected subsystem
+      multiple: true
+      options:
+        - Boot / bootloader integration
+        - GDT / TSS
+        - IDT / exception handling
+        - Serial diagnostics
+        - Framebuffer / graphics
+        - Build system / runner
+        - CI
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider, and why weren't they chosen?
+    validations:
+      required: false
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Expected compatibility impact
+      description: Does this affect boot behavior, visible framebuffer output, dependency versions, or existing APIs?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: willing-to-implement
+    attributes:
+      label: Willingness to implement
+      options:
+        - "Yes, I would like to implement this myself"
+        - "I could help but would need guidance"
+        - "No, I am only proposing the idea"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand that roadmap inclusion is not guaranteed and pvKernel is early-stage software.
+          required: true

@@ -1,0 +1,112 @@
+name: Bug report
+description: Report a reproducible problem with pvKernel.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please do not use this form for
+        suspected security vulnerabilities — see SECURITY.md instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: pvKernel version or commit
+      description: Output of `git rev-parse HEAD`, or the release tag used.
+      placeholder: e.g. 0.0.2 or a commit hash
+    validations:
+      required: true
+
+  - type: input
+    id: host-os
+    attributes:
+      label: Host operating system
+      placeholder: e.g. Ubuntu 24.04, Windows 11 + WSL2
+    validations:
+      required: true
+
+  - type: textarea
+    id: wsl-linux-details
+    attributes:
+      label: WSL/Linux details
+      description: WSL version and distribution, or native Linux distribution and kernel version.
+      placeholder: e.g. WSL2, Ubuntu 24.04, WSLg enabled
+    validations:
+      required: false
+
+  - type: input
+    id: rust-toolchain
+    attributes:
+      label: Rust toolchain
+      description: Output of `rustc --version` (or `rustup show`).
+    validations:
+      required: true
+
+  - type: input
+    id: qemu-version
+    attributes:
+      label: QEMU version
+      description: Output of `qemu-system-x86_64 --version`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Reproduction steps
+      description: Exact commands run, in order.
+      placeholder: |
+        1. cargo build
+        2. cargo run
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: serial-output
+    attributes:
+      label: Complete serial output
+      description: Paste the full terminal output from `cargo run`, unedited.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: local-modifications
+    attributes:
+      label: Local modifications
+      description: Have you modified pvKernel's source code from the reported version/commit?
+      options:
+        - "No, this is an unmodified checkout"
+        - "Yes, I have local modifications (please describe them below)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: local-modifications-details
+    attributes:
+      label: Details of local modifications
+      description: Required if you selected "Yes" above.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: not-a-vulnerability
+    attributes:
+      label: Confirmation
+      options:
+        - label: This is not a report of a suspected security vulnerability (see SECURITY.md for that process).
+          required: true
