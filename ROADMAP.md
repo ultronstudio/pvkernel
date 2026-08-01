@@ -27,10 +27,18 @@ added in this milestone.
 
 ## 0.0.4 — Hardware Interrupts and Timer
 
-- PIC or APIC initialization
-- enabling maskable hardware interrupts
-- a timer interrupt source
-- basic IRQ dispatch
+- a legacy 8259 PIC driver: IRQ vector remapping, masking/unmasking, EOI,
+  and spurious IRQ7/IRQ15 detection
+- IDT handlers for all 16 remapped IRQ vectors (32-47)
+- a PIT channel 0 periodic timer with an atomic tick counter
+- a boot-time verification that hardware interrupts are safely enabled and
+  repeated timer ticks are delivered
+- a fatal-halt vs. interrupt-enabled idle distinction
+- deterministic, headless QEMU tests (timer delivery and an expected page
+  fault) with a pass/fail exit status, and CI coverage for them
+
+APIC support, keyboard input, and any other IRQ line beyond the timer are
+out of scope for this milestone and remain future roadmap items.
 
 ## 0.0.5 — Physical Memory Allocator
 

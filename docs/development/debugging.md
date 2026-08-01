@@ -44,6 +44,34 @@ If `[test] breakpoint returned successfully` is missing, the breakpoint
 handler did not return correctly; this indicates a GDT/IDT configuration
 problem, not a normal breakpoint.
 
+## Timer interrupt test
+
+Every normal boot also verifies, right after the breakpoint test, that
+hardware interrupts are safely enabled and the PIT keeps delivering IRQ0:
+
+```
+[test] waiting for timer interrupts
+[irq] PIT IRQ0 unmasked
+[cpu] maskable hardware interrupts enabled
+[test] timer ticks advanced from 0 to 6 (uptime ~60 ms)
+[test] timer tick counter advanced successfully
+```
+
+The reported tick advance is generally slightly more than the minimum of 5
+ticks the kernel waits for (`hlt` can wake up to the next tick boundary
+rather than exactly on it), and the printed frequency/uptime reflect the
+PIT's actual configured rate (see [docs/architecture/timer.md](../architecture/timer.md)),
+not the raw 100 Hz request. If `[irq] WARNING: unexpected IRQ mask: ...` is
+printed afterward, a masked IRQ line delivered a real (non-spurious)
+interrupt; see [docs/architecture/hardware-interrupts.md](../architecture/hardware-interrupts.md)
+for how spurious vs. unexpected IRQs are distinguished.
+
+If the boot log stops after `[irq] PIT IRQ0 unmasked` /
+`[cpu] maskable hardware interrupts enabled` and never reaches the tick
+report, the timer is not delivering interrupts (PIC remapping, EOI, or PIT
+configuration is likely broken) and the kernel is hanging in
+`pit::wait_for_ticks`.
+
 ## Page-fault test
 
 Run:
@@ -52,7 +80,7 @@ Run:
 cargo run --features fault-tests
 ```
 
-Expected output, after the breakpoint test:
+Expected output, after the breakpoint and timer tests:
 
 ```
 [test] WARNING: triggering an intentional page fault
@@ -62,9 +90,13 @@ error code: PageFaultErrorCode(...)
 ... (interrupt stack frame) ...
 ```
 
-The kernel halts in the page-fault handler; QEMU does not restart (this was
-verified against `-no-reboot`). The faulting address `0xdead_beef` is chosen
-because it is not mapped in pvKernel's current address space, so
+Without the `qemu-test` feature, the kernel halts in the page-fault handler
+(`halt::halt_forever`); QEMU does not restart (this was verified against
+`-no-reboot`). With `qemu-test` also enabled, the handler instead recognizes
+this specific, deliberately triggered fault and exits QEMU successfully
+(`[test] expected page fault matched`) instead of halting — see
+[docs/development/testing.md](testing.md). The faulting address `0xdead_beef`
+is chosen because it is not mapped in pvKernel's current address space, so
 dereferencing it reliably produces a page fault rather than reading
 unrelated memory.
 
