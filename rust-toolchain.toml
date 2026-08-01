@@ -1,7 +1,9 @@
 [toolchain]
 channel = "nightly"
 profile = "minimal"
-components = ["rustfmt", "clippy", "llvm-tools"]
+# rust-src is required by the `bootloader` crate's build script, which uses
+# `-Z build-std` to compile its BIOS/UEFI stage binaries from source.
+components = ["rustfmt", "clippy", "llvm-tools", "rust-src"]
 targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]
 
 # CPU: x86_64

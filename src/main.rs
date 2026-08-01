@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         .arg("-display")
         .arg("gtk,gl=off")
         .arg("-name")
-        .arg("pvKernel 0.0.1")
+        .arg("pvKernel 0.0.2")
         .arg("-serial")
         .arg("stdio")
         .arg("-monitor")

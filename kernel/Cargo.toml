@@ -1,15 +1,35 @@
 [package]
 name = "kernel"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
 
+# Disables Cargo's implicit test harness for this binary. `kernel` is a
+# `#![no_std]` binary with its own `#[panic_handler]`; the default test
+# harness links against `std` and its own panic runtime, which conflicts
+# with ours (duplicate `panic_impl` lang item). This crate has no unit
+# tests, so disabling the harness removes the conflict without affecting
+# `cargo build`/`cargo run`.
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+
+[features]
+default = []
+# Enables a boot-time test that deliberately triggers a page fault to
+# exercise the page-fault handler. Disabled by default; see
+# docs/development/debugging.md for how to run it.
+fault-tests = []
+
 [dependencies]
 bootloader_api = "=0.11.17"
+spin = "0.9.8"
 uart_16550 = "0.4.0"
 x86_64 = "0.15.2"
 
 # bootloader_api: BootInfo structure and kernel output point
+# spin: no_std synchronization primitives (Mutex, Once) for static kernel state
 # uart_16550: diagnostic output through serial port
 # x86_64: safe managing some CPU instructions
