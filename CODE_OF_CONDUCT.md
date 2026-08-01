@@ -38,6 +38,16 @@ This code of conduct applies to pvKernel's GitHub repository (issues, pull
 requests, discussions, and comments) and any other space that is officially
 designated as a pvKernel community space.
 
+## AI-assisted contributions
+
+Using AI assistance to help write a contribution is allowed. It does not
+exempt a contribution from ordinary review and approval: AI-generated code
+is held to the same standard as any other, is only merged after it has been
+reviewed and approved, and the submitting contributor remains fully
+responsible for it. See
+[CONTRIBUTING.md](CONTRIBUTING.md#11-ai-assisted-contribution-policy) for
+the full policy.
+
 ## Enforcement
 
 Maintainers may edit, hide, lock, or remove content that violates this code

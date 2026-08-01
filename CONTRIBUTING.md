@@ -111,6 +111,12 @@ AI-assisted development is permitted, but contributors remain fully
 responsible for understanding, reviewing, testing, and documenting every
 submitted change.
 
+AI-generated code is only accepted once it has been reviewed and approved
+through the normal pull-request review process; it is never merged solely
+because a contributor generated it, and it receives no exemption from any
+requirement in this document (unsafe-code policy, required checks,
+dependency policy, and so on).
+
 Unexplained generated code, unverified unsafe code, fabricated test results,
 or pull requests that the contributor cannot explain will not be accepted.
 

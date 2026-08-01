@@ -49,13 +49,14 @@ committed `Cargo.lock`.
 - **Purpose**: provides safe or narrowly-scoped-unsafe wrappers over x86_64
   CPU structures and instructions: `GlobalDescriptorTable`,
   `TaskStateSegment`, `InterruptDescriptorTable`, segment register access,
-  `Cr2`, and `hlt`/`int3`.
+  `Cr2`, `hlt`/`int3`, and port I/O (`Port`/`PortWriteOnly`) used by the
+  legacy PIC and PIT drivers.
 - **Why external**: reimplementing these primitives would duplicate a
   well-reviewed, widely used crate without adding value, and would expand
   pvKernel's unsafe surface area for no benefit.
 - **What pvKernel still owns**: how these primitives are assembled — the
-  actual GDT/TSS/IDT contents, the double-fault IST stack, and all exception
-  handler logic in `kernel/src/arch/x86_64/`.
+  actual GDT/TSS/IDT contents, the double-fault IST stack, all exception and
+  IRQ handler logic, and the PIC/PIT drivers, in `kernel/src/arch/x86_64/`.
 - **no_std status**: `no_std`-compatible; this is a foundational crate for
   bare-metal x86_64 development.
 - **Replacement boundary**: pvKernel uses its existing APIs rather than

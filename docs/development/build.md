@@ -75,6 +75,18 @@ cargo run --features fault-tests
 See [docs/development/debugging.md](debugging.md) for the expected output
 and how the page-fault handler behaves.
 
+## 7. Running the deterministic headless QEMU tests
+
+```bash
+cargo run --features qemu-test -- --headless-test
+cargo run --features "qemu-test fault-tests" -- --headless-test
+```
+
+Both boot headlessly (no graphical window) and exit QEMU with a pass/fail
+status instead of idling forever. See
+[docs/development/testing.md](testing.md) for how this works and what each
+command verifies.
+
 ## Common build failures
 
 - **`error: toolchain 'nightly-...' is not installed`**: run `rustup show`

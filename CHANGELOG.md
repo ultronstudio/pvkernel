@@ -6,6 +6,49 @@ claiming strict compliance.
 
 ## [Unreleased]
 
+## [0.0.4] - Hardware Interrupts and Timer
+
+### Added
+
+- A legacy dual 8259 PIC driver (`kernel::arch::x86_64::pic`): IRQ vector
+  remapping to 32-47, per-line masking/unmasking, end-of-interrupt handling
+  (including the slave-then-master cascade order), and spurious IRQ7/IRQ15
+  detection via the in-service register.
+- A PIT channel 0 periodic timer driver (`kernel::arch::x86_64::pit`),
+  configured for approximately 100 Hz, with an atomic tick counter and an
+  uptime helper.
+- IDT handlers for all 16 remapped IRQ vectors (32-47): a timer handler, two
+  spurious-IRQ handlers, and generic handlers for every other line that
+  pvKernel keeps masked in this release.
+- A boot-time verification that unmasks the timer IRQ, enables maskable
+  hardware interrupts, and confirms the tick counter advances before
+  continuing.
+- A distinction between fatal halting (`halt::halt_forever`, used for panics
+  and fatal CPU exceptions) and an interrupt-enabled idle loop
+  (`halt::idle_loop`), which normal boot now ends in instead of halting
+  immediately.
+- QEMU `isa-debug-exit` support (`kernel::arch::x86_64::qemu`, behind the new
+  `qemu-test` Cargo feature) and a root runner `--headless-test` flag, so the
+  timer and expected-page-fault tests can run deterministically and exit
+  with a pass/fail status suitable for CI.
+- A `qemu-tests` CI job running both headless tests on every pull request
+  and push to `main`.
+- New documentation:
+  [docs/architecture/hardware-interrupts.md](docs/architecture/hardware-interrupts.md),
+  [docs/architecture/timer.md](docs/architecture/timer.md), and
+  [docs/development/testing.md](docs/development/testing.md).
+
+### Changed
+
+- The expected-page-fault test (`fault-tests` feature) now runs after the
+  timer verification instead of before it, so a `fault-tests` build always
+  exercises PIC/PIT timer interrupts before its deliberate fault.
+- The root runner's window title is now `pvKernel 0.0.4`.
+- The `qemu-tests` CI job now builds each headless test binary in an
+  untimed step before running it, and raises the run timeout to 120
+  seconds, since GitHub-hosted runners have no `/dev/kvm` and fall back to
+  slower TCG emulation.
+
 ## [0.0.3] - CPU Exception Correctness
 
 ### Fixed
