@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.2` — CPU Exception Foundation
+Version: `0.0.3` — CPU Exception Correctness
 
 Implemented:
 

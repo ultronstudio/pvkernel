@@ -17,7 +17,7 @@ entry_point!(kernel_main);
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kprintln!();
     kprintln!("========================================");
-    kprintln!("pvKernel 0.0.2");
+    kprintln!("pvKernel 0.0.3");
     kprintln!("Architecture: x86_64");
     kprintln!("Boot mode: UEFI");
     kprintln!("========================================");
@@ -60,7 +60,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "fault-tests")]
     arch::x86_64::interrupts::run_page_fault_test();
 
-    kprintln!("pvKernel 0.0.2 initialized");
+    kprintln!("pvKernel 0.0.3 initialized");
     kprintln!("CPU halted");
 
     halt_loop();

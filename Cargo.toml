@@ -5,7 +5,7 @@ members = ["kernel"]
 [package]
 name = "pvkernel-runner"
 license = "MIT OR Apache-2.0"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 publish = false
 description = "An experimental x86_64 operating system kernel written in Rust, developed as the foundation of pvOS."

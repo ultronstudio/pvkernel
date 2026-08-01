@@ -7,10 +7,10 @@ pub fn render_boot_screen(framebuffer: &mut FrameBuffer) {
     let background = [8, 12, 20];
     let accent = [0, 183, 239]; // #00B7EF
 
-    // Vyplnit celé pozadí
+    // Fill the entire background
     fill_rect(buffer, info, 0, 0, info.width, info.height, background);
 
-    // Velikost loga/P
+    // Logo/P size
     let p_size = info.height.min(info.width).saturating_mul(35) / 100;
     let p_x = (info.width.saturating_sub(p_size)) / 2;
     let p_y = (info.height.saturating_sub(p_size)) / 2;
@@ -34,16 +34,16 @@ fn draw_p_logo(
     let bowl_w = size / 2;
     let bowl_h = size / 3;
 
-    // Levá svislá noha
+    // Left vertical stem
     fill_rect(buffer, info, stem_x, top_y, stroke, size * 3 / 4, color);
 
-    // Horní vodorovná čára
+    // Top horizontal bar
     fill_rect(buffer, info, stem_x, top_y, bowl_w, stroke, color);
 
-    // Prostřední vodorovná čára
+    // Middle horizontal bar
     fill_rect(buffer, info, stem_x, top_y + bowl_h, bowl_w, stroke, color);
 
-    // Pravá svislá část horní smyčky
+    // Right vertical part of the upper loop
     fill_rect(
         buffer,
         info,
