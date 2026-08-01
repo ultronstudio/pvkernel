@@ -42,6 +42,24 @@ jobs:
       - name: Build with qemu-test and mem-fault-tests features
         run: cargo build --features "qemu-test mem-fault-tests"
 
+      - name: Build with userspace-syscall-test feature
+        run: cargo build --features userspace-syscall-test
+
+      - name: Build with userspace-privilege-fault-test feature
+        run: cargo build --features userspace-privilege-fault-test
+
+      - name: Build with userspace-supervisor-fault-test feature
+        run: cargo build --features userspace-supervisor-fault-test
+
+      - name: Build with qemu-test and userspace-syscall-test features
+        run: cargo build --features "qemu-test userspace-syscall-test"
+
+      - name: Build with qemu-test and userspace-privilege-fault-test features
+        run: cargo build --features "qemu-test userspace-privilege-fault-test"
+
+      - name: Build with qemu-test and userspace-supervisor-fault-test features
+        run: cargo build --features "qemu-test userspace-supervisor-fault-test"
+
   qemu-tests:
     name: Deterministic QEMU interrupt tests
     runs-on: ubuntu-latest
@@ -104,3 +122,32 @@ jobs:
         # not-present fault against the expected address and exits
         # successfully instead of halting.
         run: timeout 120 cargo run --features "qemu-test mem-fault-tests" -- --headless-test
+
+      - name: Build userspace syscall-boundary test binary
+        run: cargo build --features "qemu-test userspace-syscall-test"
+
+      - name: Run userspace syscall-boundary test
+        # Transitions into CPL3 via iretq, exercises the int 0x80 bootstrap
+        # ABI (an unknown syscall number, ABI_VERSION_QUERY, and
+        # DEBUG_WRITE_BYTE) from ring 3, confirms a PIT tick interrupts and
+        # resumes CPL3 execution, then exits via the TEST_EXIT syscall.
+        run: timeout 120 cargo run --features "qemu-test userspace-syscall-test" -- --headless-test
+
+      - name: Build userspace privilege-fault test binary
+        run: cargo build --features "qemu-test userspace-privilege-fault-test"
+
+      - name: Run userspace privilege-fault test
+        # Transitions into CPL3 via iretq, then executes cli; the resulting
+        # #GP is matched against the expected CPL3 origin and exits
+        # successfully instead of halting.
+        run: timeout 120 cargo run --features "qemu-test userspace-privilege-fault-test" -- --headless-test
+
+      - name: Build userspace supervisor-page-fault test binary
+        run: cargo build --features "qemu-test userspace-supervisor-fault-test"
+
+      - name: Run userspace supervisor-page-fault test
+        # Transitions into CPL3 via iretq, then reads a mapped-but-
+        # supervisor-only page; the resulting #PF is matched against the
+        # expected address and error-code bits and exits successfully
+        # instead of halting.
+        run: timeout 120 cargo run --features "qemu-test userspace-supervisor-fault-test" -- --headless-test
