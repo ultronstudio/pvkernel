@@ -30,11 +30,17 @@ jobs:
       - name: Build with fault-tests feature
         run: cargo build --features fault-tests
 
+      - name: Build with mem-fault-tests feature
+        run: cargo build --features mem-fault-tests
+
       - name: Build with qemu-test feature
         run: cargo build --features qemu-test
 
       - name: Build with qemu-test and fault-tests features
         run: cargo build --features "qemu-test fault-tests"
+
+      - name: Build with qemu-test and mem-fault-tests features
+        run: cargo build --features "qemu-test mem-fault-tests"
 
   qemu-tests:
     name: Deterministic QEMU interrupt tests
@@ -88,3 +94,13 @@ jobs:
         # the handler matches it against the expected faulting address and
         # exits successfully instead of halting.
         run: timeout 120 cargo run --features "qemu-test fault-tests" -- --headless-test
+
+      - name: Build expected post-unmap page-fault test binary
+        run: cargo build --features "qemu-test mem-fault-tests"
+
+      - name: Run expected post-unmap page-fault test
+        # Maps a page, writes and verifies a sentinel value, unmaps it, then
+        # deliberately re-accesses it; the handler matches the resulting
+        # not-present fault against the expected address and exits
+        # successfully instead of halting.
+        run: timeout 120 cargo run --features "qemu-test mem-fault-tests" -- --headless-test
