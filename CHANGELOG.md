@@ -6,6 +6,24 @@ claiming strict compliance.
 
 ## [Unreleased]
 
+## [0.0.3] - CPU Exception Correctness
+
+### Fixed
+
+- The double-fault IST stack's backing storage is now explicitly writable
+  (`UnsafeCell`-backed), instead of a plain immutable `static` that had no
+  defined contract for the CPU's own writes into it.
+- Documentation on `DOUBLE_FAULT_IST_INDEX` now distinguishes the zero-based
+  Rust array index from the hardware IST slot encoding (1-7) applied by the
+  `x86_64` crate's `set_stack_index`.
+- Confirmed the CI toolchain declaration (`rust-toolchain.toml`) already
+  installs the `rust-src` component required by the `bootloader` crate's
+  `-Z build-std` step, so both local development and CI use the same
+  declared toolchain.
+- Translated the remaining Czech inline comments in
+  `kernel/src/graphics/framebuffer.rs` to English, matching the rest of the
+  repository's documentation language.
+
 ## [0.0.2] - 2026-08-01
 
 ### Added

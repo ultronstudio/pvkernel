@@ -14,41 +14,52 @@ project learns more about what each step actually requires.
 - controlled boot-time breakpoint test
 - optional page-fault test behind a Cargo feature
 
-## 0.0.3 — Hardware Interrupts and Timer
+## 0.0.3 — CPU Exception Correctness
+
+Corrections found during review of the 0.0.2 release. No new subsystems are
+added in this milestone.
+
+- writable (`UnsafeCell`-backed) double-fault IST stack storage
+- clarified documentation of the IST index (Rust array index vs. hardware
+  IST slot encoding)
+- confirmed CI toolchain declaration installs `rust-src`
+- translated remaining non-English source comments
+
+## 0.0.4 — Hardware Interrupts and Timer
 
 - PIC or APIC initialization
 - enabling maskable hardware interrupts
 - a timer interrupt source
 - basic IRQ dispatch
 
-## 0.0.4 — Physical Memory Allocator
+## 0.0.5 — Physical Memory Allocator
 
 - parsing the bootloader-provided memory map into a frame allocator
 - frame allocation and deallocation primitives
 
-## 0.0.5 — Virtual Memory and Kernel Heap
+## 0.0.6 — Virtual Memory and Kernel Heap
 
 - kernel-owned page tables
 - a kernel heap
 - Rust `alloc` support
 
-## 0.0.6 — Kernel Tasks and Scheduler
+## 0.0.7 — Kernel Tasks and Scheduler
 
 - kernel-level tasks
 - context switching
 - a preemptive scheduler
 
-## 0.0.7 — Ring 3 and System Calls
+## 0.0.8 — Ring 3 and System Calls
 
 - user mode execution
 - a system call interface
 
-## 0.0.8 — ELF Userspace Loader and Init
+## 0.0.9 — ELF Userspace Loader and Init
 
 - loading ELF userspace binaries
 - a minimal init process
 
-## 0.0.9 — VFS and Initial Ramdisk
+## 0.0.10 — VFS and Initial Ramdisk
 
 - a virtual filesystem layer
 - initial ramdisk support
