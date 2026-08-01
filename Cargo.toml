@@ -4,9 +4,12 @@ members = ["kernel"]
 
 [package]
 name = "pvkernel-runner"
+license = "MIT OR Apache-2.0"
 version = "0.0.1"
 edition = "2024"
 publish = false
+description = "An experimental x86_64 operating system kernel written in Rust, developed as the foundation of pvOS."
+repository = "https://github.com/ultronstudio/pvkernel"
 
 [dependencies]
 ovmf-prebuilt = "0.2.4"
