@@ -78,11 +78,12 @@ pvKernel ELF (kernel_main)
       and consumes it completely). This must happen after the IDT, so a
       page fault occurring during memory initialization is still handled,
       and before the PIC/PIT, so no other subsystem can create page-table
-      mappings first. Internally, this step first validates that CR4.LA57
-      (five-level paging) is **not** active — panicking loudly otherwise —
-      before doing anything that assumes a four-level CR3 root, and takes
-      ownership of `BootInfo::memory_regions` (moving it out, rather than
-      aliasing it) before building the frame allocator from it. See
+      mappings first. Internally, this step validates that CR4.LA57
+      (five-level paging) is **not** active and that IA32_EFER.NXE is
+      enabled, then enables and verifies CR0.WP, before doing anything that
+      assumes a four-level CR3 root. It then takes ownership of
+      `BootInfo::memory_regions` (moving it out, rather than aliasing it)
+      before building the frame allocator from it. See
       [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md).
    5. The legacy 8259 PIC is remapped to vectors 32-47
       (`arch::x86_64::pic::initialize`), then every IRQ line is masked
@@ -107,11 +108,14 @@ pvKernel ELF (kernel_main)
     mapped, written to, unmapped, and deliberately re-accessed, matching the
     resulting page fault against its expected address (see
     [docs/development/memory-testing.md](docs/development/memory-testing.md)).
-11. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
+11. If `supervisor-write-protection-test` is enabled, a CPL0 write to a
+    supervisor-only read-only page verifies CR0.WP behavior through an
+    expected protection-violation page fault.
+12. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
     test payload is mapped into the reserved userspace range and entered at
     CPL3 via `iretq`; the scenario ends deterministically (see
     [docs/development/userspace-testing.md](docs/development/userspace-testing.md)).
-12. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
+13. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
     the `qemu-test` Cargo feature is enabled, in which case QEMU exits
     deterministically instead (see
     [docs/development/testing.md](docs/development/testing.md)).

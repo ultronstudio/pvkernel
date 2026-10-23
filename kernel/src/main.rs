@@ -131,6 +131,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "mem-fault-tests")]
     arch::x86_64::memory::run_unmap_fault_test();
 
+    #[cfg(feature = "supervisor-write-protection-test")]
+    arch::x86_64::memory::run_supervisor_write_protection_test();
+
     // `run_test` never returns: every scenario it selects ends by exiting
     // QEMU or halting/panicking. Everything below is therefore compiled
     // out under `userspace-test`, rather than left as dead but reachable

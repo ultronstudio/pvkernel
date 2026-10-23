@@ -27,6 +27,10 @@ fault-tests = []
 # not-present/supervisor/read classification. Disabled by default; see
 # docs/development/memory-testing.md for how to run it.
 mem-fault-tests = []
+# Enables a boot-time test that writes from CPL0 to a supervisor read-only
+# page and expects a protection-violation page fault. Combine with qemu-test
+# for deterministic QEMU success; see docs/development/memory-testing.md.
+supervisor-write-protection-test = []
 # Enables QEMU isa-debug-exit support and expected-fault checks used by the
 # deterministic headless QEMU tests. Disabled by default; see
 # docs/development/testing.md for how to run them.

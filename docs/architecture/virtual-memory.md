@@ -208,11 +208,24 @@ to redesign the permission type.
 
 ## NX (`EFER.NXE`)
 
-pvKernel's bootloader (`bootloader-x86_64-common`) already sets
-`EFER.NXE` before jumping to `kernel_main`, which is what makes the
-page-table `NO_EXECUTE` bit meaningful. `memory::init` verifies this at
-runtime (`Efer::read().contains(EferFlags::NO_EXECUTE_ENABLE)`) and logs
-the result, rather than assuming it or re-enabling it itself.
+pvKernel's bootloader (`bootloader-x86_64-common`) sets `EFER.NXE` before
+jumping to `kernel_main`, which makes the page-table `NO_EXECUTE` bit
+meaningful. `memory::validate_paging_prerequisites`, at the start of
+`memory::init`, requires `IA32_EFER.NXE` to be active and panics with an
+explicit prerequisite failure before page-table initialization if it is
+not. The existing W^X mapping policy therefore cannot silently operate
+without execute-disable support.
+
+## Supervisor write protection (`CR0.WP`)
+
+`memory::validate_paging_prerequisites` also ensures `CR0.WP` is set before
+address-space initialization proceeds. If the bootloader did not set it,
+pvKernel enables it and verifies the resulting state. This is required
+because without `CR0.WP`, supervisor code can write through mappings marked
+read-only, bypassing the page protections the kernel relies on. The
+deterministic `supervisor-write-protection-test` QEMU scenario verifies the
+invariant by attempting a CPL0 write to a present, supervisor-only,
+read-only page and accepting only the matching protection-violation fault.
 
 ## Address translation (`paging::translate`)
 
@@ -315,11 +328,6 @@ test verify, and how to run them.
 * No kernel heap or Rust `alloc` support (now planned for 0.0.7; see
   [ROADMAP.md](../../ROADMAP.md)).
 * No guard pages (nothing yet needs a growable, guarded region).
-* No write-protection (CR0.WP) boot-time test — read-only enforcement is
-  implemented (`update_permissions`/`KERNEL_READ_ONLY`) but not exercised
-  by a dedicated "write to a read-only page faults" deterministic test in
-  this milestone; that is left as explicit future work rather than
-  expanding this milestone's QEMU test surface further.
 * No SMP-aware locking beyond `without_interrupts` + `spin::Mutex` (correct
   for a single CPU; would need revisiting for multi-core support).
 * No huge-page creation, and no support for unmapping/remapping a range
