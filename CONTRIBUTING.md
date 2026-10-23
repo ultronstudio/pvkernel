@@ -123,6 +123,15 @@ or pull requests that the contributor cannot explain will not be accepted.
 Contributors are not required to disclose the specific editor or assistance
 tool they used, unless legally required.
 
+The repository carries GitHub Copilot instructions
+([.github/copilot-instructions.md](.github/copilot-instructions.md) and
+[.github/instructions/](.github/instructions/)) that encode pvKernel's
+security invariants for code review. Copilot review is advisory and
+non-deterministic: it does not replace human review, and a clean Copilot
+review is not evidence that a change is secure. AI output about a possible
+vulnerability follows
+[docs/security/security-triage.md](docs/security/security-triage.md).
+
 ## 12. Licensing
 
 Contributions are accepted under `MIT OR Apache-2.0`, matching the project's
@@ -130,5 +139,11 @@ existing license.
 
 ## 13. Security reports
 
-Do not report suspected security vulnerabilities in public issues or pull
-requests. See [SECURITY.md](SECURITY.md) for the private reporting process.
+Do not report suspected security vulnerabilities in public issues, pull
+requests, or review comments, and do not put exploit details for an
+unreleased vulnerability in a pull request description or commit message.
+Use GitHub Private Vulnerability Reporting; see [SECURITY.md](SECURITY.md)
+for the process and [docs/security/security-triage.md](docs/security/security-triage.md)
+for how reports are triaged. If a review (human or Copilot) raises a
+possible vulnerability in a released version, keep the discussion to "needs
+security triage" and move the details to a private channel.

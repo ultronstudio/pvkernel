@@ -44,6 +44,15 @@ claiming strict compliance.
   AI-assisted security policy.
 * `docs/audits/2026-10-pvkernel-0.0.6-pre-release.md`: first hardening-pass
   audit record.
+* Security triage infrastructure: GitHub Copilot repository and
+  path-specific review instructions, a read-only `security-triage` custom
+  agent and a supplementary VS Code prompt file, a structured
+  `.github/VULNERABILITY_REPORT.yml` private-reporting form, a
+  conservative GHSA/CVE triage process
+  ([docs/security/security-triage.md](docs/security/security-triage.md)),
+  and a `Security triage` workflow that validates those policy files
+  (`scripts/check_security_policy.py`). Copilot recommends; humans decide
+  GHSA/CVE disclosure. No advisory was created and no CVE was requested.
 
 This is a process/correctness hardening pass; no kernel-visible
 functionality changed and the package version stays `0.0.6`.

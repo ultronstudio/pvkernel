@@ -17,7 +17,7 @@ Required:
 
 * **Require a pull request before merging** - no direct pushes to `main`.
 * **Require status checks to pass** - add every job listed in
-  [Required status checks](#4-required-status-checks-to-register) below.
+  [Required status checks](#2-required-status-checks-to-register) below.
 * **Require branches to be up to date before merging** - only if the
   maintainer finds this worth the extra re-run cost; not strictly
   required with a single maintainer, but prevents merging a PR whose
@@ -75,7 +75,20 @@ QEMU / CPL3 supervisor-memory fault
 Dependency audit (cargo audit)
 Dependency policy (cargo deny)
 Workflow lint (actionlint)
+Security policy files
 ```
+
+`Security policy files` is reported by `.github/workflows/security-triage.yml`,
+which deliberately has no `paths:` filter so it runs on every pull request
+(see [security-triage.md](security-triage.md#policy-file-validation)).
+Register it only after it has reported at least once.
+
+Note on path-filtered checks: `security.yml` runs on pull requests only when
+its `paths:` filter matches. A required check from a workflow that did not
+run on a given PR stays pending and blocks the merge. Before registering
+the `security.yml` jobs above as required, either accept that docs-only PRs
+will not satisfy them, or remove the `paths:` filter from the
+`pull_request` trigger. This document does not change that behavior.
 
 `Dependency review (pull requests only)` should also be required once it
 has reported on a PR that actually changes a dependency (it is
@@ -181,10 +194,81 @@ Notes:
   cannot have silently changed" and "these exact bytes were built by this
   exact GitHub Actions run from this exact commit."
 
+## 6. Security triage, private reporting, and Copilot review
+
+These support [security-triage.md](security-triage.md). Source-controlled
+parts (the Copilot instruction/agent/prompt files and
+`.github/VULNERABILITY_REPORT.yml`) take effect once merged to the default
+branch; the settings below do not live in the repository.
+
+### Private vulnerability reporting
+
+* **Enable** it: Settings -> Advanced Security -> Private vulnerability
+  reporting. Observed state when this section was written
+  (2026-10-23, read-only API query): **enabled**.
+* **Require a CWE assignment**: Settings -> Advanced Security -> Private
+  vulnerability reporting -> Settings -> Submission requirements ->
+  "Require a CWE assignment". Recommended ON. The form file cannot enforce
+  this (it offers an optional "Suggested CWE" field); the requirement is
+  this setting. Its state could not be read through the API available when
+  this was written, so it is **unverified**.
+* **Custom form**: `.github/VULNERABILITY_REPORT.yml` (issue-form syntax).
+  If GitHub cannot parse or validate it, reporters silently get the
+  default form instead, so after merging, open
+  `https://github.com/ultronstudio/pvkernel/security/advisories/new` as a
+  non-owner or in a private window and confirm the custom fields appear.
+  Once a custom form exists, reports submitted through the REST API must
+  match it.
+
+### Copilot code review
+
+Settings that GitHub documents for this feature:
+
+* Settings -> Copilot -> Code review -> **Use custom instructions when
+  reviewing pull requests**: leave ON (the default) so
+  `.github/copilot-instructions.md` and `.github/instructions/` are used.
+* Settings -> Copilot -> Code review -> **Review effort level**: **Lite**
+  (standard) or **Balanced** (deeper analysis of complex logic and
+  security-sensitive code, at higher AI-credit cost). Balanced is the
+  better fit for kernel code if the cost is acceptable.
+* Automatic review is a **ruleset rule**, not a setting of its own:
+  Settings -> Rules -> Rulesets -> branch ruleset targeting the default
+  branch -> "Automatically request Copilot code review", with "Review new
+  pushes" ON (and optionally "Review draft pull requests").
+
+Prepared change, not applied: create a **separate** branch ruleset (for
+example named `Copilot review`, targeting the default branch, enforcement
+Active) containing only that rule with "Review new pushes" enabled. A
+separate ruleset avoids editing `Protect main`. Copilot review is advisory
+and non-deterministic; it never replaces human review and must not be added
+as a required check.
+
+Availability of these controls depends on the account's Copilot plan.
+
+### Maintainer notifications
+
+Per-user settings; they cannot be committed. Watch the repository with
+**Custom -> Security alerts** (or All Activity) and make sure email is
+included under Settings -> Notifications -> Subscriptions -> Watching.
+GitHub uses this to notify administrators and security managers of new
+private vulnerability reports. No SMTP service or email action is used by
+any workflow.
+
+### Observed ruleset state
+
+Read-only API query on 2026-10-23: the repository has one ruleset,
+`Protect main` (target: default branch, enforcement: active; repository
+admin role may bypass). Its rules were `deletion` and `non_fast_forward`
+only. It had **no** "Require a pull request before merging" rule and **no**
+"Require status checks to pass" rule, which are the controls section 1
+above calls for. This pass did not modify the ruleset.
+
 ## Verification status
 
 Every setting above is a **recommendation**, not a confirmed/enabled
-state. This hardening pass did not modify any repository setting; see the
-final report's "GitHub settings requiring manual configuration" section
-and its explicit confirmation that no remote repository settings were
-changed.
+state, except where a section above says "Observed state". The only
+repository settings read while preparing the security-triage change were
+read-only API queries (private vulnerability reporting status and the
+ruleset's rule types). No repository setting was modified; the
+"Observed" notes are a point-in-time snapshot and should be re-checked in
+the GitHub UI.
