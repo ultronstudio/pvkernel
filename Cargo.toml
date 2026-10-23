@@ -2,14 +2,26 @@
 resolver = "3"
 members = ["kernel"]
 
+# Single authoritative version (and shared metadata) for every crate in the
+# workspace. `kernel/Cargo.toml` inherits `version.workspace = true` instead
+# of repeating the literal string, so a release can never bump one crate's
+# version and silently miss the other; see
+# docs/security/vulnerability-management.md and the release workflows for
+# why that consistency matters at release time.
+[workspace.package]
+version = "0.0.6"
+license = "MIT OR Apache-2.0"
+edition = "2024"
+repository = "https://github.com/ultronstudio/pvkernel"
+
 [package]
 name = "pvkernel-runner"
-license = "MIT OR Apache-2.0"
-version = "0.0.6"
-edition = "2024"
+license.workspace = true
+version.workspace = true
+edition.workspace = true
 publish = false
 description = "An experimental x86_64 operating system kernel written in Rust, developed as the foundation of pvOS."
-repository = "https://github.com/ultronstudio/pvkernel"
+repository.workspace = true
 
 [dependencies]
 ovmf-prebuilt = "0.2.4"

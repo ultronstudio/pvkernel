@@ -1,0 +1,171 @@
+name: Security
+
+# Runs on anything that can change what pvKernel builds or what it depends
+# on, plus a weekly schedule (so a newly published advisory against an
+# already-committed dependency is still caught) and manual dispatch.
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "kernel/**"
+      - "src/**"
+      - "build.rs"
+  push:
+    branches: [main]
+  schedule:
+    # 06:00 UTC every Monday.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  # Lets release-candidate.yml/release.yml run this exact same security
+  # gate as one of their required jobs, instead of duplicating it.
+  workflow_call:
+
+# Least privilege by default. Individual jobs below elevate only the
+# specific permission they need (security-events: write, to upload SARIF).
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: Dependency audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Cache cargo-audit binary
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-bin-v2
+
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+
+      - name: Audit committed Cargo.lock
+        # Fails the job (and therefore this required check) on any
+        # unpatched RustSec advisory. `cargo audit` has no `--locked` flag
+        # (verified locally: `cargo audit --locked` rejects it as an
+        # unknown argument) - it always reads the committed Cargo.lock
+        # directly and never re-resolves it.
+        #
+        # `cargo audit` does not read deny.toml, so the one documented,
+        # temporary exception tracked there (PVK-2026-0001 - bincode
+        # 1.3.3/RUSTSEC-2025-0141, unmaintained with no safe upgrade
+        # available; see deny.toml and
+        # docs/security/vulnerability-management.md) is repeated here
+        # explicitly via `--ignore`. Any other advisory still fails this
+        # job. Adding another `--ignore` here requires the same
+        # documented-exception treatment as a deny.toml entry - never
+        # silent suppression.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+
+  cargo-deny:
+    name: Dependency policy (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          # deny.toml checks advisories, licenses, sources, and bans in one
+          # pass; see that file for the policy and rationale behind each
+          # setting.
+          command: check
+
+  dependency-review:
+    name: Dependency review (pull requests only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # required by comment-summary-in-pr: always below
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          # Fails the PR if it introduces a dependency with a known,
+          # unpatched vulnerability at or above this severity.
+          fail-on-severity: low
+          comment-summary-in-pr: always
+
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # required to upload the SARIF below
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@48e36f54d8da326b83ab061aee2cc5e01b5ca46f # v1
+        with:
+          fail_level: error
+          sarif: actionlint-results.sarif
+
+      - name: Upload actionlint SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        with:
+          sarif_file: actionlint-results.sarif
+          category: actionlint
+
+  codeql:
+    name: CodeQL (Rust)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # required to upload CodeQL results
+      actions: read # required for private-repo CodeQL status checks
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        with:
+          languages: rust
+          # Rust's CodeQL extractor does not reliably autobuild a
+          # cross-compiled, `-Z build-std`, `#![no_std]` workspace driven by
+          # a pinned nightly via rust-toolchain.toml. `manual` build mode
+          # means CodeQL traces exactly the build command below instead of
+          # guessing one, so the actual kernel build (not a stand-in) is
+          # what gets analyzed.
+          build-mode: manual
+
+      - name: Build workspace under CodeQL trace
+        # Builds both the no_std kernel binary (via the root crate's
+        # build-dependency on it) and the host-side runner/build script
+        # that the kernel binary is embedded into, exactly like `cargo
+        # build --locked` in every other job.
+        run: cargo build --locked
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        with:
+          category: "/language:rust"

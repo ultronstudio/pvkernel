@@ -43,7 +43,46 @@ behavior.
 
 pvKernel does not enable five-level paging (CR4.LA57); the bootloader
 configures standard 4-level paging, which pvKernel verifies at boot
-(`memory::five_level_paging_active`) rather than assuming.
+(`memory::validate_paging_prerequisites`) rather than assuming. This check
+runs at the very start of `memory::init`, strictly before
+`address_space::init` ever interprets the CR3 frame as a four-level table
+root (`active_level_4_table` / `OffsetPageTable::new`): if CR4.LA57 is set,
+`memory::init` panics immediately instead of reconstructing a page table
+under a four-level assumption that the hardware does not actually satisfy.
+There is no code path in pvKernel that reaches page-table reconstruction
+before this check.
+
+## `BootInfo` and memory-map ownership
+
+`kernel_main` receives `boot_info: &'static mut BootInfo` from the
+bootloader. Everything else `kernel_main` still needs from it (currently
+only the framebuffer, via `boot_info.framebuffer.take()`) is extracted
+*before* `boot_info` is passed into `arch::init`, which takes it **by
+value** and forwards it, unchanged, into `memory::init` — which also takes
+it by value and does not return it. After that call, there is no live
+`&mut BootInfo` anywhere in the kernel: the compiler enforces this, since
+`kernel_main`'s own `boot_info` binding was moved away.
+
+Within `memory::init`, the real `MemoryRegions` value is moved out of
+`boot_info.memory_regions` with `core::mem::replace`, leaving an
+always-empty placeholder (`static mut EMPTY_MEMORY_REGIONS: [MemoryRegion;
+0]`) in its place so the field stays valid. The moved-out `MemoryRegions` is
+then converted to a `&'static mut [MemoryRegion]` via its safe,
+upstream-provided `From` conversion and immediately downgraded to a shared
+`&'static [MemoryRegion]` before being handed to `BootFrameAllocator::new`.
+
+This is a deliberate change from pvKernel 0.0.5/0.0.6's original design,
+which reconstructed a `'static` slice from `boot_info.memory_regions`'s raw
+pointer and length (`core::slice::from_raw_parts`) while `kernel_main`
+*also* kept using the same `&'static mut BootInfo` afterward (for the
+framebuffer). That was sound in practice (nothing ever mutated
+`memory_regions` after the fact), but the exclusivity invariant was
+documented, not enforced: nothing in the type system prevented a future
+change from reading or writing `boot_info.memory_regions` while the frame
+allocator's cached slice was still considered authoritative. The current
+design removes that possibility structurally: the frame allocator's memory
+map is *moved*, not aliased, and the only other owner (`boot_info` itself)
+is unreachable by the time the move happens.
 
 ## Bootloader-established mappings
 
@@ -111,10 +150,15 @@ sufficient; a future SMP milestone would need to revisit this (see
 ### `active_level_4_table` safety invariants
 
 Reconstructing `&'static mut PageTable` from the physical address in CR3
-requires four invariants, documented at its definition
+requires five invariants, documented at its definition
 (`address_space.rs`):
 
-1. **A valid physical-memory mapping exists.** Guaranteed by requesting
+1. **Four-level paging is active (CR4.LA57 clear).** Verified by
+   `memory::validate_paging_prerequisites`, which runs before this function
+   is ever reachable (see [Canonical addresses and paging
+   mode](#canonical-addresses-and-paging-mode) above) and panics instead of
+   letting a five-level CR3 root be misinterpreted as a four-level one.
+2. **A valid physical-memory mapping exists.** Guaranteed by requesting
    `Mapping::Dynamic` for `physical_memory` in the bootloader config (see
    above); `memory::init` panics loudly if the mapping is absent instead of
    dereferencing a bogus offset.

@@ -1,5 +1,11 @@
 # Security Policy
 
+See also [docs/security/vulnerability-management.md](docs/security/vulnerability-management.md)
+for the internal `PVK-YYYY-NNNN` tracking scheme, the finding lifecycle,
+and the AI-assisted security policy, and
+[docs/security/release-policy.md](docs/security/release-policy.md) for how
+a fix reaches a security release.
+
 ## Project Status
 
 pvKernel is currently an experimental, early-stage operating system kernel.

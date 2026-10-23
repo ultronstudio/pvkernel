@@ -1,0 +1,190 @@
+name: Build pvKernel release artifacts
+description: >-
+  Builds the real release-profile kernel ELF and UEFI disk image, then
+  generates an SPDX SBOM, SHA-256 checksums, and a release manifest from
+  those actual outputs. Used identically by the release-candidate and
+  stable release workflows so both produce artifacts the same way.
+inputs:
+  version:
+    description: 'Release version, e.g. "0.0.7" (no leading "v", no rc suffix).'
+    required: true
+  release-label:
+    description: 'Optional label appended to versioned artifact names, e.g. "rc.1". Empty for a stable release.'
+    required: false
+    default: ""
+  ci-result:
+    description: Result of the correctness-gate job that ran before this one (e.g. "success").
+    required: true
+  security-result:
+    description: Result of the security-gate job that ran before this one (e.g. "success").
+    required: true
+outputs:
+  artifacts-dir:
+    description: Directory containing every generated release artifact.
+    value: ${{ steps.locate.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned toolchain
+      shell: bash
+      run: rustup show
+
+    - name: Stage SBOM output directory
+      shell: bash
+      run: mkdir -p release-artifacts
+
+    - name: Generate SPDX SBOM
+      # Runs *before* the release build below, while `target/` does not yet
+      # exist: `path: .` would otherwise also hand syft the entire build
+      # output tree (hundreds of MB of object files and embedded prebuilt
+      # firmware), which is neither the smallest nor the most accurate
+      # source for a dependency SBOM. Scanning the checked-out source tree
+      # keeps this an accurate source/workspace-level SBOM (syft's
+      # Cargo.lock cataloger reads the resolved dependency graph directly)
+      # rather than a scan of unrelated build artifacts. This is not a
+      # binary/package-level SBOM of the compiled kernel; it describes the
+      # workspace's build/source dependency graph.
+      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      with:
+        path: .
+        format: spdx-json
+        output-file: release-artifacts/pvkernel-${{ inputs.version }}.spdx.json
+        upload-artifact: false
+        upload-release-assets: false
+
+    - name: Build release profile
+      shell: bash
+      # This is the same build.rs-driven process as `cargo build`/`cargo
+      # run` in every other job: compiling the root `pvkernel-runner`
+      # package compiles the `kernel` artifact dependency first, then
+      # build.rs calls `bootloader::UefiBoot::create_disk_image` to embed
+      # it into a UEFI disk image. Nothing here is a placeholder; both
+      # outputs located below are real build products of this exact commit.
+      run: cargo build --release --locked
+
+    - name: Locate build outputs and stage artifacts
+      id: locate
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version="${{ inputs.version }}"
+        label="${{ inputs.release-label }}"
+        suffix="${version}"
+        if [ -n "$label" ]; then
+          suffix="${version}-${label}"
+        fi
+
+        kernel_elf="target/x86_64-unknown-none/release/kernel"
+        if [ ! -f "$kernel_elf" ]; then
+          echo "::error::kernel ELF not found at $kernel_elf" >&2
+          exit 1
+        fi
+
+        uefi_img=$(find target/release/build/pvkernel-runner-*/out -maxdepth 1 -name 'pvkernel-uefi.img' -type f | head -n1)
+        if [ -z "$uefi_img" ] || [ ! -f "$uefi_img" ]; then
+          echo "::error::UEFI disk image not found under target/release/build/pvkernel-runner-*/out" >&2
+          exit 1
+        fi
+
+        dir="release-artifacts"
+        # Deliberately not `rm -rf`: the SBOM was already generated into
+        # this directory above, before `target/` existed. `mkdir -p` is
+        # idempotent and leaves it in place.
+        mkdir -p "$dir"
+
+        cp "$kernel_elf" "$dir/pvkernel-${suffix}.elf"
+        cp "$uefi_img" "$dir/pvkernel-${suffix}-uefi.img"
+
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"
+        echo "elf=$dir/pvkernel-${suffix}.elf" >> "$GITHUB_OUTPUT"
+        echo "uefi=$dir/pvkernel-${suffix}-uefi.img" >> "$GITHUB_OUTPUT"
+        echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+    - name: Generate checksums
+      shell: bash
+      # Computed last, after every other artifact (including the SBOM) is
+      # in its final form, so SHA256SUMS always covers the artifacts
+      # actually published alongside it - never a since-replaced
+      # intermediate.
+      run: |
+        set -euo pipefail
+        dir="${{ steps.locate.outputs.dir }}"
+        (cd "$dir" && sha256sum pvkernel-* > SHA256SUMS)
+        cat "$dir/SHA256SUMS"
+
+    - name: Generate release manifest
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="${{ steps.locate.outputs.dir }}"
+        version="${{ inputs.version }}"
+        label="${{ inputs.release-label }}"
+        commit_sha="${{ github.sha }}"
+        # Derived from the commit being released, not wall-clock build
+        # time: reproducible across however many times this workflow runs
+        # against the same commit, unlike `date -u`.
+        commit_date="$(git show -s --format=%cI "$commit_sha")"
+        rustc_version="$(rustc -Vv | tr '\n' ';')"
+        lockfile_hash="sha256:$(sha256sum Cargo.lock | cut -d' ' -f1)"
+
+        python3 - "$dir" "$version" "$label" "$commit_sha" "$commit_date" "$rustc_version" "$lockfile_hash" <<'PYEOF'
+        import json, os, sys, hashlib
+
+        d, version, label, commit_sha, commit_date, rustc_version, lockfile_hash = sys.argv[1:8]
+
+        artifacts = []
+        for name in sorted(os.listdir(d)):
+            if name in ("SHA256SUMS",):
+                continue
+            path = os.path.join(d, name)
+            if not os.path.isfile(path):
+                continue
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            artifacts.append({"name": name, "sha256": h.hexdigest()})
+
+        manifest = {
+            "pvkernel_version": version,
+            "release_label": label or None,
+            "git_commit": commit_sha,
+            "commit_date": commit_date,
+            "rustc_version": rustc_version.rstrip(";"),
+            "target_architecture": "x86_64-unknown-none",
+            "build_profile": "release",
+            "cargo_lock_hash": lockfile_hash,
+            "artifacts": artifacts,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            "github_run_number": os.environ.get("GITHUB_RUN_NUMBER"),
+            "github_workflow": os.environ.get("GITHUB_WORKFLOW"),
+            "checks": {
+                "ci": os.environ.get("CI_RESULT"),
+                "security": os.environ.get("SECURITY_RESULT"),
+            },
+        }
+
+        with open(os.path.join(d, "release-manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+        PYEOF
+      env:
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        GITHUB_WORKFLOW: ${{ github.workflow }}
+        CI_RESULT: ${{ inputs.ci-result }}
+        SECURITY_RESULT: ${{ inputs.security-result }}
+
+    - name: Re-generate checksums to include the manifest
+      shell: bash
+      # release-manifest.json is written after the first SHA256SUMS pass
+      # (it needs every other artifact's hash as input), so SHA256SUMS is
+      # regenerated once more here to also cover the manifest itself -
+      # this is the final, final pass; nothing is modified afterward.
+      run: |
+        set -euo pipefail
+        dir="${{ steps.locate.outputs.dir }}"
+        (cd "$dir" && sha256sum pvkernel-* release-manifest.json > SHA256SUMS)
+        cat "$dir/SHA256SUMS"

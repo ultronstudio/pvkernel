@@ -86,10 +86,20 @@ impl KernelAddressSpace {
 
 /// Returns a mutable reference to the currently active level-4 page table.
 ///
+/// Callers must not reach this function before
+/// `super::validate_paging_prerequisites` has confirmed CR4.LA57 is clear:
+/// `Cr3::read()` always returns a frame address regardless of paging mode,
+/// but interpreting it as a four-level `PageTable` (as this function and
+/// `OffsetPageTable` both do) is only correct in that mode. `super::init`
+/// enforces the ordering (validate, then call this function), so by the
+/// time this runs, four-level paging is a confirmed precondition, not an
+/// assumption.
+///
 /// # Safety
 ///
 /// The caller must guarantee that:
 ///
+/// - four-level paging is active (CR4.LA57 clear), per the above;
 /// - `phys_mem_offset` is the actual virtual address at which the
 ///   bootloader mapped the whole of physical memory (i.e. the bootloader
 ///   was configured with `mappings.physical_memory = Some(Mapping::Dynamic)`

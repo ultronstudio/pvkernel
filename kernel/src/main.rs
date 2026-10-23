@@ -44,7 +44,7 @@ const TIMER_TEST_TICKS: u64 = 5;
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kprintln!();
     kprintln!("========================================");
-    kprintln!("pvKernel 0.0.6");
+    kprintln!("pvKernel {}", env!("CARGO_PKG_VERSION"));
     kprintln!("Architecture: x86_64");
     kprintln!("Boot mode: UEFI");
     kprintln!("========================================");
@@ -61,11 +61,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         usable_memory / 1024 / 1024
     );
 
+    // Takes ownership of the framebuffer out of `boot_info` *before*
+    // `boot_info` itself is handed to `arch::init`, which consumes it
+    // entirely (see that function and `arch::x86_64::memory::init` for why).
+    // This is what lets `kernel_main` keep using the framebuffer afterward
+    // without retaining any other access to `boot_info`.
+    let mut framebuffer = boot_info.framebuffer.take();
+
+    // `boot_info` is moved into `arch::init` here and not returned: after
+    // this call, `kernel_main` has no further way to reach `BootInfo` (the
+    // compiler enforces this, since `boot_info` is a `&'static mut`
+    // reference and this function no longer has a live binding for it).
     arch::init(boot_info);
 
     arch::x86_64::memory::run_boot_smoke_test();
 
-    if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
+    if let Some(framebuffer) = framebuffer.as_mut() {
         let info = framebuffer.info();
 
         kprintln!(
@@ -129,7 +140,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     #[cfg(not(feature = "userspace-test"))]
     {
-        kprintln!("pvKernel 0.0.6 initialized");
+        kprintln!("pvKernel {} initialized", env!("CARGO_PKG_VERSION"));
         kprintln!("entering interrupt-enabled idle loop");
 
         #[cfg(feature = "qemu-test")]

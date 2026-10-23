@@ -29,7 +29,15 @@ const PIT_TARGET_HZ: u32 = 100;
 /// one. Maskable hardware interrupts stay disabled and IRQ0 stays masked
 /// until the caller explicitly unmasks it and re-enables interrupts later
 /// in boot.
-pub fn init(boot_info: &mut BootInfo) {
+///
+/// Takes `boot_info` by value (not `&mut`) and passes it on into
+/// [`memory::init`], which consumes it completely and does not return it.
+/// This is deliberate: `kernel_main` extracts everything else it still
+/// needs from `BootInfo` (currently just the framebuffer) *before* calling
+/// this function, so that once `boot_info` is moved in here, nothing in the
+/// kernel retains any other way to reach it. See [`memory::init`] for why
+/// that matters.
+pub fn init(boot_info: &'static mut BootInfo) {
     x86_64::instructions::interrupts::disable();
     crate::kprintln!("[cpu] maskable hardware interrupts disabled");
 

@@ -5,4 +5,20 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
     open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+
+  # Keeps third-party Action references (pinned to commit SHAs; see
+  # .github/workflows/*.yml) up to date. Dependabot updates the pinned SHA
+  # and the trailing version comment together, so a reviewer can see both
+  # the new version and the new commit it resolves to.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

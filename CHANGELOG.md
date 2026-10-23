@@ -6,6 +6,48 @@ claiming strict compliance.
 
 ## [Unreleased]
 
+### Changed
+
+* `BootInfo`/`MemoryRegions` ownership is now moved, not aliased: the
+  physical frame allocator's memory map is taken out of `BootInfo` by
+  value (`core::mem::replace`) instead of being reconstructed as a
+  `'static` slice via `core::slice::from_raw_parts` while a separate
+  mutable `BootInfo` reference stayed reachable. See
+  [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md).
+* Paging-mode (CR4.LA57) validation now runs and panics loudly *before*
+  the active page table is ever reconstructed, instead of being checked
+  and merely logged afterward.
+* The Rust nightly toolchain is now pinned to an exact date
+  (`rust-toolchain.toml`) instead of floating on `channel = "nightly"`.
+* The pvKernel version string (boot banner, QEMU window title) is now
+  derived from `CARGO_PKG_VERSION`/workspace-inherited package metadata
+  instead of being hardcoded in multiple places.
+* CI (`.github/workflows/ci.yml`) was split into independently-visible
+  jobs (format, clippy, build matrix, and one job per deterministic QEMU
+  scenario) so a single failing scenario can't hide behind an
+  aggregate job.
+
+### Added
+
+* `.github/workflows/security.yml`: CodeQL (Rust), `cargo audit`,
+  `cargo deny`, GitHub Dependency Review, and `actionlint`, with SARIF
+  results uploaded to GitHub Code Scanning where applicable.
+* `.github/workflows/release-candidate.yml` and
+  `.github/workflows/release.yml`: validated, artifact-producing release
+  pipelines (checksums, SPDX SBOM, release manifest, GitHub artifact
+  attestation), gated on the full correctness/security suite and, for
+  stable releases, a protected `release` environment approval.
+* `deny.toml`: dependency advisory/license/source policy for
+  `cargo deny`.
+* `docs/security/vulnerability-management.md`: the `PVK-YYYY-NNNN`
+  internal vulnerability identifier scheme, finding lifecycle, and
+  AI-assisted security policy.
+* `docs/audits/2026-10-pvkernel-0.0.6-pre-release.md`: first hardening-pass
+  audit record.
+
+This is a process/correctness hardening pass; no kernel-visible
+functionality changed and the package version stays `0.0.6`.
+
 ## [0.0.6] - Userspace Entry and Syscall Foundation
 
 ### Added

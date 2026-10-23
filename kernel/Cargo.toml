@@ -1,9 +1,9 @@
 [package]
 name = "kernel"
-version = "0.0.6"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 # Disables Cargo's implicit test harness for this binary. `kernel` is a
 # `#![no_std]` binary with its own `#[panic_handler]`; the default test

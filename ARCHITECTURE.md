@@ -54,7 +54,12 @@ pvKernel ELF (kernel_main)
 1. `kernel_main` receives `BootInfo` from the bootloader.
 2. Serial diagnostics are printed (COM1, `drivers::serial`).
 3. The boot memory map is summarized.
-4. `arch::init(boot_info)` runs, in this exact order:
+4. The framebuffer is taken out of `BootInfo` (`boot_info.framebuffer.take()`),
+   so `kernel_main` still has it after `BootInfo` itself is consumed in the
+   next step.
+5. `arch::init(boot_info)` runs, taking `boot_info` by value (not `&mut`):
+   nothing in the kernel can reach `BootInfo` again after this call returns.
+   It runs, in this exact order:
    1. Maskable hardware interrupts are disabled
       (`x86_64::instructions::interrupts::disable()`).
    2. The kernel-owned GDT and TSS are built and loaded
@@ -69,10 +74,15 @@ pvKernel ELF (kernel_main)
       happen after the GDT/TSS, because the double-fault entry references an
       IST index that is only meaningful once the TSS is active.
    4. The physical frame allocator and active page-table access are
-      initialized (`arch::x86_64::memory::init`). This must happen after
-      the IDT, so a page fault occurring during memory initialization is
-      still handled, and before the PIC/PIT, so no other subsystem can
-      create page-table mappings first; see
+      initialized (`arch::x86_64::memory::init`, which receives `boot_info`
+      and consumes it completely). This must happen after the IDT, so a
+      page fault occurring during memory initialization is still handled,
+      and before the PIC/PIT, so no other subsystem can create page-table
+      mappings first. Internally, this step first validates that CR4.LA57
+      (five-level paging) is **not** active — panicking loudly otherwise —
+      before doing anything that assumes a four-level CR3 root, and takes
+      ownership of `BootInfo::memory_regions` (moving it out, rather than
+      aliasing it) before building the frame allocator from it. See
       [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md).
    5. The legacy 8259 PIC is remapped to vectors 32-47
       (`arch::x86_64::pic::initialize`), then every IRQ line is masked

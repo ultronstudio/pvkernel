@@ -24,7 +24,7 @@ mod paging;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bootloader_api::BootInfo;
-use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 #[cfg(feature = "qemu-test")]
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::{
@@ -62,15 +62,35 @@ pub const TEMP_MAPPING_BASE: u64 = 0xFFFF_9000_0000_0000;
 #[cfg_attr(not(feature = "userspace-test"), allow(dead_code))]
 pub const USERSPACE_RANGE_BASE: u64 = 0x0000_6000_0000_0000;
 
+/// Placeholder [`MemoryRegions`] used only to give
+/// `BootInfo::memory_regions` a valid value to hold once [`init`] has moved
+/// the real one out of it (see [`init`]). Always empty, and never read
+/// through: `init` runs exactly once, consumes `boot_info` completely, and
+/// does not return it to its caller, so nothing ever observes this
+/// placeholder as if it were real memory-map data.
+static mut EMPTY_MEMORY_REGIONS: [MemoryRegion; 0] = [];
+
 /// Initializes the physical frame allocator and active page-table access.
 ///
 /// Must run after the GDT/IDT are installed (so a page fault during memory
-/// initialization is still handled) and while `boot_info` is still
-/// available. Only reads `boot_info.physical_memory_offset` and
-/// `boot_info.memory_regions`; does not touch `boot_info.framebuffer`, so
-/// the caller can keep using that field afterward.
+/// initialization is still handled).
+///
+/// Takes `boot_info` by value and does not return it: this function (via
+/// [`arch::x86_64::init`](super::init), which forwards `boot_info` here
+/// unchanged) is the last code that ever touches `BootInfo`. It moves the
+/// real [`MemoryRegions`] out of `boot_info.memory_regions` (see below)
+/// instead of reconstructing an aliasing `'static` view of it, so once this
+/// function returns there is no live `&mut BootInfo` anywhere in the
+/// kernel, and the physical frame allocator's memory-map reference is the
+/// *sole* owner of that data rather than an alias of a field someone else
+/// could still mutate.
 ///
 /// # Panics
+///
+/// Panics if CR4.LA57 (five-level paging) is active: pvKernel only
+/// implements four-level paging, and every later step in this function
+/// (`address_space::init`, and everything built on it) assumes a
+/// four-level CR3 root. See [`validate_paging_prerequisites`].
 ///
 /// Panics if the bootloader did not supply a physical-memory offset
 /// mapping. `kernel/src/main.rs` requests this mapping explicitly through a
@@ -79,35 +99,48 @@ pub const USERSPACE_RANGE_BASE: u64 = 0x0000_6000_0000_0000;
 /// misconfiguration, not an ordinary runtime condition; none of this
 /// module's operations are possible without it, so continuing would be
 /// unsafe.
-pub fn init(boot_info: &mut BootInfo) {
+pub fn init(boot_info: &'static mut BootInfo) {
+    // Paging-mode prerequisites must hold before anything below interprets
+    // CR3 as a four-level table root (`address_space::init` does, via
+    // `active_level_4_table`/`OffsetPageTable::new`).
+    validate_paging_prerequisites();
+
     let physical_memory_offset = boot_info
         .physical_memory_offset
         .into_option()
         .expect("bootloader did not provide a physical-memory offset mapping");
     let phys_mem_offset = VirtAddr::new(physical_memory_offset);
 
-    // SAFETY: `bootloader_api::MemoryRegions` points at memory the
-    // bootloader allocates once and never frees or reuses for the life of
-    // the kernel; this is the same guarantee that lets `BootInfo` itself be
-    // passed to `kernel_main` as `&'static mut BootInfo`. Reconstructing a
-    // `'static` slice here (instead of retaining a second `&'static mut
-    // BootInfo` alias alongside `kernel_main`'s own reference) keeps exactly
-    // one owner of the full `BootInfo` while still letting the frame
-    // allocator hold the region list for the kernel's entire lifetime.
-    let regions: &'static [MemoryRegion] = unsafe {
-        core::slice::from_raw_parts(
-            boot_info.memory_regions.as_ptr(),
-            boot_info.memory_regions.len(),
-        )
-    };
+    // Moves the real `MemoryRegions` out of `boot_info`, leaving the
+    // always-empty placeholder in its place so the field stays valid. This
+    // is an ordinary, structurally-enforced ownership transfer, not an
+    // alias: after this line, `boot_info.memory_regions` no longer refers
+    // to the bootloader's actual memory map at all, so even the (already
+    // unreachable, since `boot_info` is never returned) old owner could not
+    // observe or mutate the data `regions` below now exclusively owns.
+    //
+    // SAFETY: `EMPTY_MEMORY_REGIONS` is a zero-length array, so the
+    // `&'static mut` reference taken from it can never be used to read or
+    // write any memory; forming it is sound no matter how many times this
+    // runs. (In practice it runs exactly once: `init` is called exactly
+    // once, from `arch::x86_64::init`, which is itself called exactly once,
+    // from the bootloader entry point.)
+    let placeholder = MemoryRegions::from(unsafe { &mut EMPTY_MEMORY_REGIONS[..] });
+    let regions: MemoryRegions = core::mem::replace(&mut boot_info.memory_regions, placeholder);
+    let regions: &'static mut [MemoryRegion] = regions.into();
+    // Downgraded to a shared slice immediately: nothing below ever needs to
+    // mutate the memory map, so this removes the ability to, rather than
+    // merely documenting that nothing does.
+    let regions: &'static [MemoryRegion] = regions;
 
     let usable_regions = regions
         .iter()
         .filter(|region| region.kind == MemoryRegionKind::Usable)
         .count();
 
-    // SAFETY: `regions` is the bootloader-provided memory map reconstructed
-    // immediately above; nothing else allocates physical frames from it.
+    // SAFETY: `regions` was just moved out of the bootloader-provided
+    // `BootInfo` above (not aliased from it), so it is the sole owner of
+    // this memory map; nothing else allocates physical frames from it.
     let frame_allocator = unsafe { BootFrameAllocator::new(regions) };
     let usable_frames = frame_allocator.usable_frame_count();
 
@@ -120,14 +153,7 @@ pub fn init(boot_info: &mut BootInfo) {
         usable_frames
     );
     kprintln!("[memory] active page table initialized");
-    kprintln!(
-        "[memory] paging mode: {}",
-        if five_level_paging_active() {
-            "5-level"
-        } else {
-            "4-level"
-        }
-    );
+    kprintln!("[memory] paging mode: 4-level (validated before address-space init)");
     kprintln!(
         "[memory] NX: {}",
         if nx_enabled() {
@@ -138,9 +164,32 @@ pub fn init(boot_info: &mut BootInfo) {
     );
 }
 
+/// Verifies the paging-mode precondition every later step in [`init`]
+/// assumes: that the active page table is a standard four-level x86_64
+/// hierarchy, not the five-level (LA57) variant. Must run before
+/// `address_space::init` ever interprets CR3 as the root of a four-level
+/// table; those functions assume four-level paging but do not themselves
+/// check it, so this check cannot be deferred until after they run.
+///
+/// # Panics
+///
+/// Panics if CR4.LA57 is set. pvKernel does not implement five-level
+/// paging; the bootloader currently always configures standard four-level
+/// paging, but this is verified rather than assumed, so a misconfigured or
+/// future bootloader that enabled LA57 could not cause every later
+/// page-table walk to be silently misinterpreted.
+fn validate_paging_prerequisites() {
+    assert!(
+        !five_level_paging_active(),
+        "pvKernel does not support 5-level paging (CR4.LA57 is set)"
+    );
+}
+
 /// Reports whether CR4.LA57 (five-level paging) is active. pvKernel does
 /// not enable five-level paging itself; the bootloader currently always
-/// configures standard 4-level paging.
+/// configures standard 4-level paging. Used by
+/// [`validate_paging_prerequisites`], which turns this into a hard
+/// precondition instead of an informational log.
 fn five_level_paging_active() -> bool {
     Cr4::read().contains(Cr4Flags::L5_PAGING)
 }

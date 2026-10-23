@@ -1,0 +1,55 @@
+name: Run a deterministic pvKernel QEMU scenario
+description: >-
+  Installs the pinned toolchain and QEMU, builds the kernel/runner with the
+  given feature set (untimed, so a cold build cannot cause a false timeout),
+  then runs the deterministic headless test under a bounded timeout and
+  fails the step if the kernel does not report success via isa-debug-exit.
+inputs:
+  features:
+    description: Space-separated Cargo feature list to build/run with.
+    required: true
+  description:
+    description: Human-readable summary of what this scenario exercises.
+    required: false
+    default: ""
+  run-timeout-seconds:
+    description: Timeout (seconds) for the QEMU run step only.
+    required: false
+    default: "120"
+
+runs:
+  using: composite
+  steps:
+    - name: Describe scenario
+      if: inputs.description != ''
+      shell: bash
+      run: echo "${{ inputs.description }}"
+
+    - name: Install pinned toolchain
+      shell: bash
+      run: rustup show
+
+    - name: Cache cargo registry and build artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-qemu-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}-${{ inputs.features }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-qemu-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}-
+
+    - name: Install QEMU
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+
+    - name: Build (untimed, so a cold build cannot cause a false run-timeout)
+      shell: bash
+      run: cargo build --locked --features "${{ inputs.features }}"
+
+    - name: Run deterministic headless test
+      shell: bash
+      run: timeout ${{ inputs.run-timeout-seconds }} cargo run --locked --features "${{ inputs.features }}" -- --headless-test

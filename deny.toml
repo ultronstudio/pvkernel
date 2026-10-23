@@ -1,0 +1,101 @@
+# Configuration for `cargo deny` (https://embarkstudios.github.io/cargo-deny/).
+#
+# Run locally with:
+#   cargo deny check
+#
+# Run in CI by .github/workflows/security.yml on every PR touching
+# Cargo.toml/Cargo.lock/deny.toml, on every push to main, and weekly.
+
+[graph]
+# pvKernel only ever targets x86_64 (bare-metal `x86_64-unknown-none` for the
+# kernel binary, the host triple for the UEFI-image-building runner). Other
+# platforms' dependency subtrees are not part of what pvKernel ships or
+# builds, so they are excluded from every check below.
+targets = [
+    "x86_64-unknown-none",
+    "x86_64-unknown-uefi",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+]
+
+[advisories]
+# Fail the check (and therefore CI) on any unpatched RustSec advisory
+# against the committed Cargo.lock, with no silent exceptions. A temporary
+# exception for a specific advisory ID, if ever needed, must be added here
+# explicitly with a comment explaining why and a removal plan - never
+# silently.
+version = 2
+yanked = "deny"
+ignore = [
+    # bincode 1.3.3 (pulled in transitively by `bootloader` v0.11.17, pinned
+    # in lockstep with `bootloader_api`, via mbrman -> bincode) is flagged
+    # as unmaintained, not as having an active vulnerability: the bincode
+    # maintainers ceased development permanently and state 1.3.3 is a
+    # "complete version... not in need of any updates." No safe upgrade is
+    # offered by the advisory itself, and pvKernel does not depend on
+    # bincode directly - only `bootloader` does, as a build-time-only
+    # dependency of the host image-building tool, not of the kernel
+    # binary. Tracked as PVK-2026-0001 (see
+    # docs/security/vulnerability-management.md); remove this entry once
+    # `bootloader`/`bootloader_api` are upgraded past the version that
+    # depends on bincode, or bincode gains a maintained fork.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+# Every license below is an OSI-approved or equivalently permissive license
+# already compatible with pvKernel's own MIT OR Apache-2.0 dual license (see
+# LICENSE-MIT, LICENSE-APACHE, and docs/dependencies.md). Anything not
+# listed here fails the check rather than being silently accepted.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    # Covers only the bundled Mozilla root-certificate *data* shipped by
+    # `webpki-roots` (a transitive, build-time-only dependency of `ureq`,
+    # used by `ovmf-prebuilt` to fetch firmware at build time) - not source
+    # code. CDLA-Permissive-2.0 permits use, modification, and
+    # redistribution with attribution, which is compatible with pvKernel's
+    # own MIT OR Apache-2.0 license for the one data file it covers.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Multiple versions of the same crate in the dependency graph are reported
+# but do not fail CI on their own: pvKernel does not control every
+# transitive dependency's own version choices, and this milestone's
+# dependency tree is small enough to review duplicates by hand instead of
+# banning them outright.
+multiple-versions = "warn"
+wildcards = "deny"
+# `kernel = { path = "kernel", artifact = "bin", ... }` (Cargo.toml) has no
+# version requirement, which `wildcards = "deny"` would otherwise reject.
+# That check exists to catch an unpinned crates.io dependency (`crate =
+# "*"`), not an intra-workspace path dependency, which cargo already
+# resolves to the exact local source tree with no version-drift risk.
+allow-wildcard-paths = true
+deny = [
+    # No specific crates are banned yet. Add an entry here (with a comment
+    # explaining why) if a dependency is found to be unmaintained, malicious,
+    # or otherwise unacceptable - never remove a dependency from the tree
+    # silently without recording why.
+]
+
+[sources]
+# Only the official crates.io registry is trusted. No git dependencies and
+# no alternate registries are allowed: a git dependency is not pinned by
+# the registry's own integrity checks the way a crates.io release is, and
+# an unknown alternate registry is an unreviewed supply-chain path.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

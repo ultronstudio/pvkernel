@@ -1,0 +1,240 @@
+name: Release
+
+# Manual only, and deliberately heavier than release-candidate.yml: a
+# stable release additionally requires the operator to confirm the exact
+# commit being released and pauses for native GitHub Environment approval
+# (see the `approval` job) before anything is published. See
+# docs/security/vulnerability-management.md and
+# docs/security/release-policy.md.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable version to release, e.g. "0.0.7" (no "v", no pre-release suffix).'
+        required: true
+      commit:
+        description: >-
+          Full commit SHA being released. Must equal the commit this
+          workflow run actually checks out (github.sha) - i.e. you must
+          also pick the matching branch/tag/ref in the "Use workflow
+          from" selector above. This field exists to catch dispatching
+          against the wrong ref, not to select the ref itself.
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate version and exact commit
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Verify dispatched ref matches the confirmed commit
+        run: |
+          set -euo pipefail
+          actual="${{ github.sha }}"
+          expected="${{ inputs.commit }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::this run checked out $actual but the operator confirmed $expected - wrong branch/ref selected when dispatching" >&2
+            exit 1
+          fi
+
+      - name: Validate version and derive tag
+        id: version
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$version' is not a bare X.Y.Z semantic version" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact pinned toolchain
+        run: |
+          set -euo pipefail
+          channel=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          if ! [[ "$channel" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::rust-toolchain.toml channel '$channel' is not an exact dated nightly" >&2
+            exit 1
+          fi
+          rustc -Vv
+
+      - name: Verify Cargo/workspace version matches requested version
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          runner_version=$(cargo metadata --locked --format-version 1 --no-deps \
+            | python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='pvkernel-runner'))")
+          kernel_version=$(cargo metadata --locked --format-version 1 --no-deps --manifest-path kernel/Cargo.toml \
+            | python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='kernel'))")
+          if [ "$runner_version" != "$version" ] || [ "$kernel_version" != "$version" ]; then
+            echo "::error::package versions (runner=$runner_version, kernel=$kernel_version) do not match requested version $version" >&2
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG.md has a stable entry for this version
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          if ! grep -qF "## [${version}]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' entry" >&2
+            exit 1
+          fi
+
+      - name: Verify Cargo.lock is committed
+        run: git ls-files --error-unmatch Cargo.lock
+
+      - name: Verify tag does not already exist
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists; refusing to reuse it" >&2
+            exit 1
+          fi
+
+  ci:
+    name: Correctness gate
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  security:
+    name: Security gate
+    needs: validate
+    # A reusable workflow's jobs can never receive more than the calling
+    # job grants (permissions only narrow across a `uses:` boundary, never
+    # widen). security.yml's codeql/actionlint jobs need security-events:
+    # write (SARIF upload) and actions: read (private-repo status); without
+    # this block they would be silently capped down to this workflow's
+    # top-level `contents: read` and fail when run as part of this gate.
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/security.yml
+
+  build:
+    name: Build and package release artifacts
+    needs: [validate, ci, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifacts-dir: ${{ steps.build.outputs.artifacts-dir }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Build release artifacts
+        id: build
+        uses: ./.github/actions/build-release-artifacts
+        with:
+          version: ${{ needs.validate.outputs.version }}
+          release-label: ""
+          ci-result: ${{ needs.ci.result }}
+          security-result: ${{ needs.security.result }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pvkernel-${{ needs.validate.outputs.tag }}
+          path: ${{ steps.build.outputs.artifacts-dir }}
+          if-no-files-found: error
+
+  attest:
+    name: Attest artifact provenance
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pvkernel-${{ needs.validate.outputs.tag }}
+          path: release-artifacts
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: release-artifacts/*
+
+  approval:
+    name: Stable release approval
+    needs: [validate, build, attest]
+    runs-on: ubuntu-latest
+    # Native GitHub Environment protection, not emulated approval: if the
+    # "release" environment is configured (Settings -> Environments,
+    # documented in docs/security/vulnerability-management.md and the
+    # final report) with required reviewers, this job pauses here until a
+    # human approves it in the GitHub UI. There is deliberately no `if:`
+    # condition or actor check standing in for that - an unconfigured
+    # environment does NOT fail closed on its own, which is exactly why
+    # configuring it is a mandatory manual step documented separately
+    # rather than something this workflow can enforce by itself.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        run: echo "Approved for stable release of ${{ needs.validate.outputs.tag }} at ${{ github.sha }}."
+
+  publish:
+    name: Publish stable release
+    needs: [validate, build, approval]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pvkernel-${{ needs.validate.outputs.tag }}
+          path: release-artifacts
+
+      - name: Refuse to overwrite an existing tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::release $tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+      - name: Create stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          version="${{ needs.validate.outputs.version }}"
+          gh release create "$tag" \
+            --title "pvKernel ${tag}" \
+            --target "${{ github.sha }}" \
+            --notes "Stable release of pvKernel v${version}. See CHANGELOG.md for the v${version} entry. Verify artifact provenance with: gh attestation verify <file> --repo ${{ github.repository }}" \
+            release-artifacts/*

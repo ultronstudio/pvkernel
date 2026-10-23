@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-10-23"
 profile = "minimal"
 # rust-src is required by the `bootloader` crate's build script, which uses
 # `-Z build-std` to compile its BIOS/UEFI stage binaries from source.

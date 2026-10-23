@@ -4,150 +4,201 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Lets release-candidate.yml/release.yml run this exact same correctness
+  # gate as one of their required jobs, instead of duplicating it.
+  workflow_call:
 
+# Least privilege by default: this workflow only reads the repository and
+# never needs to push commits, create releases, or comment on PRs.
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every cargo invocation below uses --locked explicitly as well; this is
+  # a defense-in-depth default for any cargo subcommand that doesn't.
+  CARGO_NET_OFFLINE: "false"
+
 jobs:
-  check:
-    name: Format and build
+  format:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install pinned toolchain
-        # Installs the exact channel, components and targets declared in
-        # rust-toolchain.toml, so CI always matches local development.
+        # Installs the exact dated nightly, profile, components and targets
+        # declared in rust-toolchain.toml. Reproducible: every runner and
+        # every contributor's machine resolves to the same compiler build.
         run: rustup show
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Build workspace
-        run: cargo build
-
-      - name: Build with fault-tests feature
-        run: cargo build --features fault-tests
-
-      - name: Build with mem-fault-tests feature
-        run: cargo build --features mem-fault-tests
-
-      - name: Build with qemu-test feature
-        run: cargo build --features qemu-test
-
-      - name: Build with qemu-test and fault-tests features
-        run: cargo build --features "qemu-test fault-tests"
-
-      - name: Build with qemu-test and mem-fault-tests features
-        run: cargo build --features "qemu-test mem-fault-tests"
-
-      - name: Build with userspace-syscall-test feature
-        run: cargo build --features userspace-syscall-test
-
-      - name: Build with userspace-privilege-fault-test feature
-        run: cargo build --features userspace-privilege-fault-test
-
-      - name: Build with userspace-supervisor-fault-test feature
-        run: cargo build --features userspace-supervisor-fault-test
-
-      - name: Build with qemu-test and userspace-syscall-test features
-        run: cargo build --features "qemu-test userspace-syscall-test"
-
-      - name: Build with qemu-test and userspace-privilege-fault-test features
-        run: cargo build --features "qemu-test userspace-privilege-fault-test"
-
-      - name: Build with qemu-test and userspace-supervisor-fault-test features
-        run: cargo build --features "qemu-test userspace-supervisor-fault-test"
-
-  qemu-tests:
-    name: Deterministic QEMU interrupt tests
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install pinned toolchain
         run: rustup show
 
       - name: Cache cargo registry and build artifacts
-        # GitHub-hosted runners start from a cold cache on every run, and
-        # this workspace pulls in the full bootloader/cargo-xtask dependency
-        # tree plus prebuilt OVMF firmware. Caching keeps compile time out of
-        # the timeouts below instead of counting against them.
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-qemu-tests-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-qemu-tests-
+            ${{ runner.os }}-cargo-clippy-
 
-      - name: Install QEMU
+      # `--all-targets` is deliberately NOT used here: it asks Cargo to also
+      # build each `[[bin]]`'s `--test` harness variant. `kernel`'s bin sets
+      # `test = false` (kernel/Cargo.toml) precisely because it is a
+      # `#![no_std]` binary with its own `#[panic_handler]`, and the
+      # standard test harness links `std` and its own `panic_impl`, which
+      # collides with the kernel's (`error[E0152]: found duplicate lang
+      # item 'panic_impl'`). Verified locally: `cargo clippy --workspace
+      # --locked --all-targets -- -D warnings` fails to even compile with
+      # that error, before any lint runs. `--workspace` alone already
+      # covers every real target (both crates' library/binary code); no
+      # lints are suppressed to work around this, the unsound flag is
+      # simply not used.
+      - name: Clippy (workspace, warnings are errors)
+        run: cargo clippy --workspace --locked -- -D warnings
+
+  build:
+    name: Build (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - default
+          - fault-tests
+          - mem-fault-tests
+          - qemu-test
+          - "qemu-test fault-tests"
+          - "qemu-test mem-fault-tests"
+          - userspace-syscall-test
+          - userspace-privilege-fault-test
+          - userspace-supervisor-fault-test
+          - "qemu-test userspace-syscall-test"
+          - "qemu-test userspace-privilege-fault-test"
+          - "qemu-test userspace-supervisor-fault-test"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}-${{ matrix.features }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}-
+
+      - name: Build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86
+          if [ "${{ matrix.features }}" = "default" ]; then
+            cargo build --locked
+          else
+            cargo build --locked --features "${{ matrix.features }}"
+          fi
 
-      - name: Build timer interrupt test binary
-        # Compiling here (untimed) keeps a cold-cache build from eating into
-        # the "timeout" budget of the run step below.
-        run: cargo build --features qemu-test
+  qemu-timer:
+    name: QEMU / timer boot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: qemu-test
+          description: >-
+            Boots headlessly, unmasks the PIT IRQ, enables hardware
+            interrupts, and verifies the tick counter advances.
 
-      - name: Run timer interrupt test
-        # Boots headlessly, unmasks the PIT IRQ, enables hardware interrupts
-        # and verifies the tick counter advances, then exits QEMU
-        # deterministically via isa-debug-exit. Times out (and fails) if the
-        # kernel never reaches the success exit. GitHub-hosted runners have
-        # no /dev/kvm, so QEMU falls back to slower TCG emulation; the
-        # timeout is generous to absorb that.
-        run: timeout 120 cargo run --features qemu-test -- --headless-test
+  qemu-page-fault:
+    name: QEMU / expected page fault
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test fault-tests"
+          description: >-
+            Deliberately dereferences an unmapped address; the handler
+            matches it against the expected faulting address and exits
+            successfully instead of halting.
 
-      - name: Build expected page-fault test binary
-        run: cargo build --features "qemu-test fault-tests"
+  qemu-post-unmap-fault:
+    name: QEMU / post-unmap page fault
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test mem-fault-tests"
+          description: >-
+            Maps a page, writes and verifies a sentinel value, unmaps it,
+            then deliberately re-accesses it; the handler matches the
+            resulting not-present fault against the expected address.
 
-      - name: Run expected page-fault test
-        # Same as above, plus a deliberate page fault after the timer test;
-        # the handler matches it against the expected faulting address and
-        # exits successfully instead of halting.
-        run: timeout 120 cargo run --features "qemu-test fault-tests" -- --headless-test
+  qemu-cpl3-syscall:
+    name: QEMU / CPL3 syscall boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test userspace-syscall-test"
+          description: >-
+            Transitions into CPL3 via iretq, exercises the int 0x80
+            bootstrap ABI (unknown syscall, ABI_VERSION_QUERY,
+            DEBUG_WRITE_BYTE), confirms a PIT tick interrupts and resumes
+            CPL3 execution, then exits via TEST_EXIT.
 
-      - name: Build expected post-unmap page-fault test binary
-        run: cargo build --features "qemu-test mem-fault-tests"
+  qemu-cpl3-privilege-fault:
+    name: QEMU / CPL3 privileged-instruction fault
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test userspace-privilege-fault-test"
+          description: >-
+            Transitions into CPL3 via iretq, then executes cli; the
+            resulting #GP is matched against its expected CPL3 origin.
 
-      - name: Run expected post-unmap page-fault test
-        # Maps a page, writes and verifies a sentinel value, unmaps it, then
-        # deliberately re-accesses it; the handler matches the resulting
-        # not-present fault against the expected address and exits
-        # successfully instead of halting.
-        run: timeout 120 cargo run --features "qemu-test mem-fault-tests" -- --headless-test
-
-      - name: Build userspace syscall-boundary test binary
-        run: cargo build --features "qemu-test userspace-syscall-test"
-
-      - name: Run userspace syscall-boundary test
-        # Transitions into CPL3 via iretq, exercises the int 0x80 bootstrap
-        # ABI (an unknown syscall number, ABI_VERSION_QUERY, and
-        # DEBUG_WRITE_BYTE) from ring 3, confirms a PIT tick interrupts and
-        # resumes CPL3 execution, then exits via the TEST_EXIT syscall.
-        run: timeout 120 cargo run --features "qemu-test userspace-syscall-test" -- --headless-test
-
-      - name: Build userspace privilege-fault test binary
-        run: cargo build --features "qemu-test userspace-privilege-fault-test"
-
-      - name: Run userspace privilege-fault test
-        # Transitions into CPL3 via iretq, then executes cli; the resulting
-        # #GP is matched against the expected CPL3 origin and exits
-        # successfully instead of halting.
-        run: timeout 120 cargo run --features "qemu-test userspace-privilege-fault-test" -- --headless-test
-
-      - name: Build userspace supervisor-page-fault test binary
-        run: cargo build --features "qemu-test userspace-supervisor-fault-test"
-
-      - name: Run userspace supervisor-page-fault test
-        # Transitions into CPL3 via iretq, then reads a mapped-but-
-        # supervisor-only page; the resulting #PF is matched against the
-        # expected address and error-code bits and exits successfully
-        # instead of halting.
-        run: timeout 120 cargo run --features "qemu-test userspace-supervisor-fault-test" -- --headless-test
+  qemu-cpl3-supervisor-fault:
+    name: QEMU / CPL3 supervisor-memory fault
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test userspace-supervisor-fault-test"
+          description: >-
+            Transitions into CPL3 via iretq, then reads a mapped-but-
+            supervisor-only page; the resulting #PF is matched against the
+            expected address and error-code bits.
