@@ -59,9 +59,11 @@ jobs:
           fi
 
           tag="v${version}-rc.${rc}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "rc=$rc"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $tag"
 
       - name: Verify exact pinned toolchain
@@ -121,14 +123,22 @@ jobs:
     needs: validate
     # A reusable workflow's jobs can never receive more than the calling
     # job grants (permissions only narrow across a `uses:` boundary, never
-    # widen). security.yml's codeql/actionlint jobs need security-events:
-    # write (SARIF upload) and actions: read (private-repo status); without
-    # this block they would be silently capped down to this workflow's
-    # top-level `contents: read` and fail when run as part of this gate.
+    # widen) - and actionlint statically verifies this across every nested
+    # job regardless of its runtime `if:` condition, so every permission
+    # any job in security.yml could need must be granted here even though
+    # `dependency-review` never actually runs in this workflow_dispatch-only
+    # pipeline. Union of what security.yml's jobs declare:
+    # security-events:write + actions:read (codeql), checks:write
+    # (actionlint's github-check reporter), pull-requests:write
+    # (dependency-review's PR comment). Without this block every one of
+    # those would be silently capped down to this workflow's top-level
+    # `contents: read` and fail when run as part of this gate.
     permissions:
       contents: read
       security-events: write
       actions: read
+      checks: write
+      pull-requests: write
     uses: ./.github/workflows/security.yml
 
   build:

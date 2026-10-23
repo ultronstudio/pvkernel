@@ -81,11 +81,14 @@ every PR trigger the same way the others do, so GitHub may not always
 offer it as a ruleset option depending on how recently it last ran).
 
 **CodeQL (Rust)** is intentionally **not** in the required list above. It
-is configured in `security.yml` (`build-mode: manual`, tracing the real
-`cargo build --locked`) and should surface findings in Code Scanning, but
-whether it reliably reports a stable, consistently-named check for this
-specific no_std/cross-compiled workspace has not been verified
-GitHub-side as part of this hardening pass. Add it to the required list
+is configured in `security.yml` (`build-mode: none` - the only build mode
+Rust's CodeQL extractor supports; an earlier `build-mode: manual` draft
+failed outright when actually run, see
+[docs/audits/2026-10-pvkernel-0.0.6-pre-release.md](../audits/2026-10-pvkernel-0.0.6-pre-release.md))
+and should surface findings in Code Scanning, but whether it reliably
+reports a stable, consistently-named check for this specific
+no_std/cross-compiled workspace across several real PRs has not been
+verified GitHub-side as part of this hardening pass. Add it to the required list
 once a maintainer confirms it reports consistently across several PRs;
 until then, requiring it risks blocking merges on an infrastructure
 hiccup rather than a real finding.

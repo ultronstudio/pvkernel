@@ -9,3 +9,7 @@
 # System files
 .DS_Store
 Thumbs.db
+
+# AI files
+CLAUDE.md
+AGENTS.md

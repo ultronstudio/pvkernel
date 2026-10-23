@@ -114,23 +114,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write # required to upload the SARIF below
+      checks: write # required by the github-check reporter below
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Run actionlint
+        # `sarif`/SARIF upload is NOT a real input of this action - verified
+        # by actually running it: it only accepts `entryPoint`, `args`,
+        # `github_token`, `tool_name`, `level`, `reporter`, `filter_mode`,
+        # `fail_level`, `fail_on_error`, `reviewdog_flags`,
+        # `actionlint_flags` (an unrecognized-input warning, and the SARIF
+        # file was never produced). `reporter: github-check` creates a
+        # GitHub Check Run instead, which works for every trigger this
+        # workflow has (push, schedule, workflow_dispatch, pull_request,
+        # workflow_call) - unlike the `github-pr-check`/`github-pr-review`
+        # reporters, which need an actual pull request to attach to.
         uses: reviewdog/action-actionlint@48e36f54d8da326b83ab061aee2cc5e01b5ca46f # v1
         with:
+          reporter: github-check
           fail_level: error
-          sarif: actionlint-results.sarif
-
-      - name: Upload actionlint SARIF to Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
-        with:
-          sarif_file: actionlint-results.sarif
-          category: actionlint
 
   codeql:
     name: CodeQL (Rust)
@@ -143,27 +146,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Install pinned toolchain
-        run: rustup show
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
         with:
           languages: rust
-          # Rust's CodeQL extractor does not reliably autobuild a
-          # cross-compiled, `-Z build-std`, `#![no_std]` workspace driven by
-          # a pinned nightly via rust-toolchain.toml. `manual` build mode
-          # means CodeQL traces exactly the build command below instead of
-          # guessing one, so the actual kernel build (not a stand-in) is
-          # what gets analyzed.
-          build-mode: manual
-
-      - name: Build workspace under CodeQL trace
-        # Builds both the no_std kernel binary (via the root crate's
-        # build-dependency on it) and the host-side runner/build script
-        # that the kernel binary is embedded into, exactly like `cargo
-        # build --locked` in every other job.
-        run: cargo build --locked
+          # `manual` is NOT a supported build mode for Rust - confirmed by
+          # actually running this job: CodeQL's own CLI rejects it with
+          # "Rust does not support the manual build mode. Please try using
+          # one of the following build modes instead: none." Rust's
+          # extractor analyzes source directly (no compilation trace is
+          # needed, unlike C++/Java/Go), so `none` is not a fallback but
+          # the only mode Rust actually supports.
+          build-mode: none
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3

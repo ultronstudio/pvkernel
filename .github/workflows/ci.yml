@@ -60,20 +60,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
 
-      # `--all-targets` is deliberately NOT used here: it asks Cargo to also
-      # build each `[[bin]]`'s `--test` harness variant. `kernel`'s bin sets
-      # `test = false` (kernel/Cargo.toml) precisely because it is a
-      # `#![no_std]` binary with its own `#[panic_handler]`, and the
-      # standard test harness links `std` and its own `panic_impl`, which
-      # collides with the kernel's (`error[E0152]: found duplicate lang
-      # item 'panic_impl'`). Verified locally: `cargo clippy --workspace
-      # --locked --all-targets -- -D warnings` fails to even compile with
-      # that error, before any lint runs. `--workspace` alone already
-      # covers every real target (both crates' library/binary code); no
-      # lints are suppressed to work around this, the unsound flag is
-      # simply not used.
-      - name: Clippy (workspace, warnings are errors)
-        run: cargo clippy --workspace --locked -- -D warnings
+      # Each package is clippy-checked with its own single `-p` selection,
+      # deliberately NOT `cargo clippy --workspace`. Selecting `kernel` and
+      # `pvkernel-runner` as two simultaneous root units makes Cargo's
+      # feature resolver unify features across both root units' dependency
+      # graphs; on at least one real toolchain/platform combination this
+      # unifies a `std`-enabling feature into `kernel`'s otherwise-`no_std`
+      # build of `bitflags` (a transitive dependency via the `x86_64`
+      # crate), which collides with `kernel`'s own `#[panic_handler]`
+      # (`error[E0152]: found duplicate lang item 'panic_impl'`) - the same
+      # failure `--all-targets` causes for a different reason (building
+      # `kernel`'s disabled test-harness variant, see `kernel/Cargo.toml`'s
+      # `test = false`). Checking one package at a time, with `kernel`'s
+      # real target explicit, never selects two root units together, so
+      # this cross-target unification never has a chance to occur. No
+      # lints are suppressed; both packages are still fully checked.
+      - name: Clippy (kernel, cross target)
+        run: cargo clippy -p kernel --locked --target x86_64-unknown-none -- -D warnings
+
+      - name: Clippy (pvkernel-runner, host target)
+        run: cargo clippy -p pvkernel-runner --locked -- -D warnings
 
   build:
     name: Build (${{ matrix.features }})
