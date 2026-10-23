@@ -29,7 +29,7 @@ use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::{
     VirtAddr,
-    registers::control::{Cr4, Cr4Flags},
+    registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags},
     registers::model_specific::{Efer, EferFlags},
     structures::paging::PageTableFlags,
 };
@@ -87,10 +87,10 @@ static mut EMPTY_MEMORY_REGIONS: [MemoryRegion; 0] = [];
 ///
 /// # Panics
 ///
-/// Panics if CR4.LA57 (five-level paging) is active: pvKernel only
-/// implements four-level paging, and every later step in this function
-/// (`address_space::init`, and everything built on it) assumes a
-/// four-level CR3 root. See [`validate_paging_prerequisites`].
+/// Panics if the CPU/boot environment has not enabled EFER.NXE, or if
+/// CR4.LA57 (five-level paging) is active. pvKernel's paging security model
+/// depends on NX, and every later step assumes a four-level CR3 root. CR0.WP
+/// is enabled and verified here before page-table initialization.
 ///
 /// Panics if the bootloader did not supply a physical-memory offset
 /// mapping. `kernel/src/main.rs` requests this mapping explicitly through a
@@ -182,6 +182,28 @@ fn validate_paging_prerequisites() {
     assert!(
         !five_level_paging_active(),
         "pvKernel does not support 5-level paging (CR4.LA57 is set)"
+    );
+    assert!(
+        nx_enabled(),
+        "pvKernel requires execute-disable support with IA32_EFER.NXE enabled"
+    );
+
+    // Supervisor write protection is required for read-only page-table
+    // permissions to constrain kernel code. Without CR0.WP, supervisor
+    // writes can bypass those mappings and undermine page protections and
+    // future kernel hardening. Own this invariant rather than assuming the
+    // bootloader left it enabled, then verify the resulting architectural
+    // state before any memory-management operation proceeds.
+    let cr0 = Cr0::read();
+    if !cr0.contains(Cr0Flags::WRITE_PROTECT) {
+        // SAFETY: setting CR0.WP is architecturally valid in long mode and
+        // enables supervisor write protection; it does not alter paging
+        // mode or the currently active address-space root.
+        unsafe { Cr0::write(cr0 | Cr0Flags::WRITE_PROTECT) };
+    }
+    assert!(
+        Cr0::read().contains(Cr0Flags::WRITE_PROTECT),
+        "pvKernel requires CR0.WP supervisor write protection enabled"
     );
 }
 
@@ -309,6 +331,56 @@ pub fn run_boot_smoke_test() {
     });
 
     kprintln!("[memory] temporary mapping smoke test passed");
+}
+
+/// Maps a supervisor-only read-only page and deliberately writes to it from
+/// CPL0. The page-fault handler accepts only the exact expected protection
+/// violation; returning from the write is a test failure. Run with
+/// `supervisor-write-protection-test`, and combine with `qemu-test` for a
+/// deterministic successful QEMU exit.
+#[cfg(feature = "supervisor-write-protection-test")]
+pub fn run_supervisor_write_protection_test() {
+    kprintln!("[memory] running supervisor write-protection test");
+
+    let test_addr = VirtAddr::new(TEMP_MAPPING_BASE);
+    let page = paging::page_at(test_addr).expect("TEMP_MAPPING_BASE is not page-aligned");
+
+    with_kernel_address_space(|space| {
+        assert!(
+            matches!(space.translate(test_addr), Translation::NotMapped),
+            "temporary test page was already mapped before write-protection test"
+        );
+
+        space
+            .map_new_page(page, Permissions::KERNEL_READ_ONLY)
+            .expect("failed to map supervisor read-only test page");
+
+        match space.translate(test_addr) {
+            Translation::Mapped { flags, .. } => {
+                assert!(flags.contains(PageTableFlags::PRESENT));
+                assert!(!flags.contains(PageTableFlags::WRITABLE));
+                assert!(!flags.contains(PageTableFlags::USER_ACCESSIBLE));
+                assert!(flags.contains(PageTableFlags::NO_EXECUTE));
+            }
+            other => panic!("read-only test page did not map: {other:?}"),
+        }
+    });
+
+    super::interrupts::arm_expected_write_protection_fault(test_addr.as_u64());
+    kprintln!(
+        "[memory] deliberately writing to supervisor read-only page {:#x}",
+        test_addr.as_u64()
+    );
+
+    // SAFETY: the mapping was verified present, supervisor-only, read-only,
+    // and non-executable immediately above. This volatile write is
+    // intentionally invalid and must be intercepted by the page-fault
+    // handler; returning means CR0.WP or page protection failed.
+    unsafe {
+        test_addr.as_mut_ptr::<u32>().write_volatile(0x5750_0006);
+    }
+
+    panic!("supervisor write to a read-only page did not fault");
 }
 
 /// Set while a deliberate, expected post-unmap page fault is in flight, so

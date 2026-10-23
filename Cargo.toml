@@ -33,6 +33,9 @@ fault-tests = ["kernel/fault-tests"]
 # Forwards to the kernel's post-unmap page-fault boot test; see
 # docs/development/memory-testing.md.
 mem-fault-tests = ["kernel/mem-fault-tests"]
+# Forwards to the deterministic CPL0 read-only-page write test; see
+# docs/development/memory-testing.md.
+supervisor-write-protection-test = ["kernel/supervisor-write-protection-test"]
 # Forwards to the kernel's deterministic QEMU test support; see docs/development/testing.md.
 qemu-test = ["kernel/qemu-test"]
 # Forwards to the kernel's ring-3 entry/syscall test scaffolding; see

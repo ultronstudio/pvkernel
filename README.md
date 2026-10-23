@@ -39,6 +39,8 @@ Implemented:
   permission model
 * a boot-time memory smoke test and an optional post-unmap page-fault test
   behind the `mem-fault-tests` Cargo feature
+* required NXE and CR0.WP paging invariants, plus a deterministic CPL0
+  supervisor write-protection QEMU test
 * deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
 * dedicated ring-3 (CPL3) code/data GDT descriptors and a dedicated
   TSS.RSP0 ring-transition kernel stack
@@ -47,9 +49,9 @@ Implemented:
 * a minimal, provisional, scalar-only `int 0x80` syscall ABI
 * `USER_DATA`/`USER_CODE` page permissions, reusing the existing W^X
   mapping API
-* three deterministic, headless QEMU tests for the syscall boundary, an
-  expected CPL3 privilege-instruction fault, and an expected CPL3
-  supervisor-page fault
+* four deterministic, headless QEMU tests for the syscall boundary,
+  supervisor write protection, an expected CPL3 privilege-instruction
+  fault, and an expected CPL3 supervisor-page fault
 * structured serial diagnostics
 * panic handler
 * an interrupt-enabled idle loop (plus a separate fatal halt path)

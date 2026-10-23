@@ -54,9 +54,11 @@ Clippy
 Build (default)
 Build (fault-tests)
 Build (mem-fault-tests)
+Build (supervisor-write-protection-test)
 Build (qemu-test)
 Build (qemu-test fault-tests)
 Build (qemu-test mem-fault-tests)
+Build (qemu-test supervisor-write-protection-test)
 Build (userspace-syscall-test)
 Build (userspace-privilege-fault-test)
 Build (userspace-supervisor-fault-test)
@@ -66,6 +68,7 @@ Build (qemu-test userspace-supervisor-fault-test)
 QEMU / timer boot
 QEMU / expected page fault
 QEMU / post-unmap page fault
+QEMU / supervisor write protection
 QEMU / CPL3 syscall boundary
 QEMU / CPL3 privileged-instruction fault
 QEMU / CPL3 supervisor-memory fault

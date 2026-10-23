@@ -148,6 +148,48 @@ static EXPECTED_SUPERVISOR_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(feature = "qemu-test", feature = "userspace-supervisor-fault-test"))]
 static EXPECTED_SUPERVISOR_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
 
+/// Set while a deliberate CPL0 write to a read-only page is in flight.
+#[cfg(all(feature = "qemu-test", feature = "supervisor-write-protection-test"))]
+static EXPECTED_WRITE_PROTECTION_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(feature = "qemu-test", feature = "supervisor-write-protection-test"))]
+static EXPECTED_WRITE_PROTECTION_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+
+/// Arms the expected supervisor write-protection fault immediately before
+/// the test's deliberate CPL0 write. A no-op without `qemu-test`.
+#[cfg(feature = "supervisor-write-protection-test")]
+pub(crate) fn arm_expected_write_protection_fault(addr: u64) {
+    #[cfg(feature = "qemu-test")]
+    {
+        EXPECTED_WRITE_PROTECTION_FAULT_ADDRESS.store(addr, Ordering::Relaxed);
+        EXPECTED_WRITE_PROTECTION_FAULT_ARMED.store(true, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "qemu-test"))]
+    let _ = addr;
+}
+
+/// Matches only a present-page write protection fault at the expected
+/// address, caused by supervisor code and not an instruction fetch.
+#[cfg(all(feature = "qemu-test", feature = "supervisor-write-protection-test"))]
+fn take_expected_write_protection_fault_if_matches(
+    addr: u64,
+    cpl: x86_64::PrivilegeLevel,
+    error_code: PageFaultErrorCode,
+) -> bool {
+    if EXPECTED_WRITE_PROTECTION_FAULT_ARMED.load(Ordering::Relaxed)
+        && addr == EXPECTED_WRITE_PROTECTION_FAULT_ADDRESS.load(Ordering::Relaxed)
+        && cpl == x86_64::PrivilegeLevel::Ring0
+        && error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && !error_code.contains(PageFaultErrorCode::USER_MODE)
+        && !error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH)
+    {
+        EXPECTED_WRITE_PROTECTION_FAULT_ARMED.store(false, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
 /// Arms the expected supervisor-page-fault check for `addr`. Only called
 /// from `userspace::run_supervisor_fault_test`, immediately before entering
 /// CPL3. A no-op without `qemu-test`.
@@ -260,6 +302,17 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     let faulting_address = Cr2::read_raw();
     let cpl = stack_frame.code_segment.rpl();
+
+    #[cfg(all(feature = "qemu-test", feature = "supervisor-write-protection-test"))]
+    if take_expected_write_protection_fault_if_matches(faulting_address, cpl, error_code) {
+        kprintln!("[exception] page fault");
+        kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("origin: CPL{}", cpl as u8);
+        kprintln!("error code: {:?}", error_code);
+        kprintln!("{:#?}", stack_frame);
+        kprintln!("[test] expected supervisor write-protection fault matched");
+        qemu::exit_success();
+    }
 
     #[cfg(feature = "qemu-test")]
     if memory::take_expected_unmap_fault_if_matches(faulting_address, error_code) {

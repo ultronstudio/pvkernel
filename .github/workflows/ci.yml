@@ -91,9 +91,11 @@ jobs:
           - default
           - fault-tests
           - mem-fault-tests
+          - supervisor-write-protection-test
           - qemu-test
           - "qemu-test fault-tests"
           - "qemu-test mem-fault-tests"
+          - "qemu-test supervisor-write-protection-test"
           - userspace-syscall-test
           - userspace-privilege-fault-test
           - userspace-supervisor-fault-test
@@ -166,6 +168,20 @@ jobs:
             Maps a page, writes and verifies a sentinel value, unmaps it,
             then deliberately re-accesses it; the handler matches the
             resulting not-present fault against the expected address.
+
+  qemu-supervisor-write-protection:
+    name: QEMU / supervisor write protection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test supervisor-write-protection-test"
+          description: >-
+            Maps a present, supervisor-only read-only page, then writes to it
+            from CPL0; only the exact present/write/supervisor protection
+            fault at the expected address exits successfully.
 
   qemu-cpl3-syscall:
     name: QEMU / CPL3 syscall boundary

@@ -1,11 +1,12 @@
-# pvKernel 0.0.6 pre-0.0.7 hardening pass - audit report
+# pvKernel 0.0.6 pre-release hardening audit report
 
 **Date:** 2026-10-23
-**Scope:** P0 correctness/release-engineering hardening pass ahead of
-pvKernel 0.0.7 feature development (BootInfo/MemoryRegions ownership,
-paging-mode validation, toolchain pinning, CI/security/release
-infrastructure). No kernel feature work (heap, scheduler, processes,
-ELF loader, VFS, APIC/SMP, new drivers) was in scope or performed.
+**Scope:** P0 correctness/release-engineering hardening and final 0.0.6
+release-blocking paging security fixes (BootInfo/MemoryRegions ownership,
+paging prerequisite validation, NXE/CR0.WP enforcement, toolchain pinning,
+CI/security/release infrastructure). No 0.0.7 kernel feature work (heap,
+scheduler, processes, ELF loader, VFS, APIC/SMP, new drivers) was in scope
+or performed.
 **Version at completion:** `0.0.6` (unchanged).
 
 This report distinguishes confirmed issues, rejected hypotheses,
@@ -37,6 +38,8 @@ output), not accepted on description alone.
 | `build-mode: manual` is not a supported CodeQL build mode for Rust: the `codeql` job failed with "A fatal error occurred: ... Rust does not support the manual build mode. Please try using one of the following build modes instead: none." | GitHub Actions run on the pushed commit | Yes - read the actual CodeQL `init` step failure log | `github/codeql-action/init` with `languages: rust, build-mode: manual` on GitHub Actions | Correctness (contradicted this pass's own `docs/security/github-configuration.md` claim that `manual` was the deliberate, safer choice) | Yes - changed to `build-mode: none` (the only mode Rust's extractor supports) and removed the now-unnecessary explicit `cargo build --locked` trace step | Re-ran via a follow-up push; `codeql` job green |
 | `reviewdog/action-actionlint@v1` has no `sarif` input (its actual inputs are `entryPoint`, `args`, `github_token`, `tool_name`, `level`, `reporter`, `filter_mode`, `fail_level`, `fail_on_error`, `reviewdog_flags`, `actionlint_flags`); the `actionlint` job's SARIF-upload step then failed with "Path does not exist: actionlint-results.sarif" | GitHub Actions run on the pushed commit, and `gh api repos/reviewdog/action-actionlint/contents/action.yml` | Yes - read the actual action.yml input list and the failure log | `reviewdog/action-actionlint@v1` with `sarif: actionlint-results.sarif` on GitHub Actions | Correctness (the SARIF-to-Code-Scanning path never worked) | Yes - switched to `reporter: github-check` (works for every trigger this workflow has, unlike the PR-only reporters) and removed the SARIF upload step and its now-unneeded `security-events: write` permission (replaced with `checks: write`) | Re-ran via a follow-up push; `actionlint` job green |
 | actionlint itself (once its own job could run) statically flagged: `release.yml`/`release-candidate.yml`'s `security:` job grants `pull-requests: none` to the reusable `security.yml`, but `security.yml`'s `dependency-review` job needs `pull-requests: write` - checked regardless of that job's runtime `if: github.event_name == 'pull_request'` condition | `actionlint`'s workflow-call permission check, GitHub Actions run on the pushed commit | Yes - read the actual actionlint annotation | `actionlint .github/workflows/release.yml .github/workflows/release-candidate.yml` | Correctness (static permission-mismatch, not a vulnerability) | Yes - added `pull-requests: write` and `checks: write` to both `security:` caller jobs' permission blocks | Re-ran `actionlint` locally and via a follow-up push; no more workflow-call permission findings |
+| NX/NXE was detected and logged but not required, allowing boot to continue without the execute-disable mechanism required by the paging/W^X model | Existing 0.0.6 pre-release audit, former follow-up finding 1 | Yes - reviewed `memory::validate_paging_prerequisites`, `nx_enabled`, and early `memory::init` ordering | Boot with `IA32_EFER.NXE` absent would fail the explicit prerequisite assertion | Release-blocking paging invariant | Yes - `validate_paging_prerequisites()` requires `IA32_EFER.NXE` before address-space initialization; the bootloader remains responsible for enabling it | Existing boot QEMU scenarios exercise the supported bootloader configuration; missing NXE fails explicitly before address-space setup. Local QEMU execution is unavailable in this environment; see verification below. |
+| CR0.WP was not established or checked, so supervisor writes could bypass read-only page-table permissions | Existing 0.0.6 pre-release audit, former follow-up finding 2 | Yes - reviewed `memory::validate_paging_prerequisites` and the CR0 setup path | `qemu-test supervisor-write-protection-test` writes from CPL0 to a present supervisor read-only page and requires the exact protection-violation error semantics and CR2 address | Release-blocking paging invariant | Yes - early paging validation enables CR0.WP when necessary and verifies it before address-space initialization | Dedicated `QEMU / supervisor write protection` CI scenario, plus all existing paging and CPL3 fault scenarios |
 
 ## Rejected
 
@@ -47,21 +50,37 @@ raised and then dismissed as a false alarm.
 
 ## Follow-up findings (P1 / P2 / informational)
 
-These are explicitly **not** fixed in this pass, per the task's scope
-(no heap/alloc/scheduler work). Recorded here so pvKernel 0.0.7 planning
-starts from a known list instead of rediscovering them.
+These are explicitly **not** fixed in this pass. Recorded here so pvKernel
+0.0.7 planning starts from a known list instead of rediscovering them.
 
 | # | Finding | Category | Evidence |
 |---|---|---|---|
-| 1 | NX is detected and logged (`memory::nx_enabled`) but never enforced as a hard precondition the way CR4.LA57 now is. A CPU/firmware configuration without NX would silently run with weaker W^X than assumed. | P1 | `grep`-confirmed: `nx_enabled()` exists and is only used in a `kprintln!`, not in any `assert!`/panic path. |
-| 2 | CR0.WP (supervisor write-protection) is never read or verified anywhere in the memory subsystem. | P1 | `grep`-confirmed: no reference to `Cr0Flags::WRITE_PROTECT` or CR0 at all in `kernel/src`. |
-| 3 | `address_space::map_new_page` allocates a physical frame, then calls `paging::map_page`; if mapping fails, the already-allocated frame is dropped via `?` and never returned to the allocator. Verified this is consistent with, not worse than, the rest of the module's model: `BootFrameAllocator` is a monotonic bump allocator with no `deallocate_frame` at all (confirmed by `grep`), and `unmap_page`'s own doc comment already states its returned frame "cannot be reused." So this is a real but not newly-introduced leak, and it matches the milestone's documented "frames are never reclaimed before heap work" model rather than violating it. Becomes load-bearing the moment real frame reclamation (heap allocator) is introduced. | P1 | Read `address_space.rs` lines 34-57 directly; confirmed no `deallocate_frame` method exists anywhere in the memory module. |
-| 4 | `BootFrameAllocator`'s frame iteration (`nth(self.next)`) re-walks from the start of the region iterator on every allocation, which is O(n) per call and O(n^2) cumulative over many allocations. Not measured as a current performance problem (allocation volume is low pre-heap), but worth a cursor-based rewrite before heap work increases allocation frequency. | P2 | Task spec's own description, cross-checked against the general shape of `BootFrameAllocator::new`/its `FrameAllocator` impl (bump-style, no persisted cursor beyond `next`). |
-| 5 | The three CPL3 fault QEMU tests (privilege fault, supervisor fault) match the faulting condition but could additionally assert the exact CPL the fault originated from, exact error-code bits, and/or the expected faulting instruction pointer, for stronger regression protection against a handler that is "sort of" right. | P2 | Task spec's own description; not independently re-derived in detail this session given the no-QEMU-locally constraint (see Verification table). |
-| 6 | ~~CodeQL's Rust support ... has not been verified GitHub-side~~ - **resolved**, see the "Confirmed and fixed" table above: `build-mode: manual` was actually wrong (Rust only supports `none`), and this was only discovered by running the workflow on GitHub Actions. Whether the resulting check reports under a stable, consistently-named check across several real PRs (as opposed to just this one push) is still unconfirmed, so it remains deliberately excluded from the required-status-check list in `docs/security/github-configuration.md` until a maintainer confirms that. | Informational | `docs/security/github-configuration.md`'s required-checks section. |
-| 7 | Several transitive dependencies have duplicate major/minor versions in the graph (`bitflags` 1.3.2/2.13.1, `getrandom` 0.2.17/0.4.3, `syn` 2.0.119/3.0.3) - reported by `cargo deny check` as warnings, not failures, per `deny.toml`'s `multiple-versions = "warn"` policy. Not a security issue; listed for completeness since it showed up during this pass's `cargo deny` runs. | Informational | `cargo deny check` output, this session. |
+| 1 | `address_space::map_new_page` allocates a physical frame, then calls `paging::map_page`; if mapping fails, the already-allocated frame is dropped via `?` and never returned to the allocator. This matches the current monotonic allocator model: no `deallocate_frame` exists, and `unmap_page` also cannot return frames for reuse. It becomes load-bearing when real frame reclamation is introduced. | Deferred to 0.0.7 | `address_space.rs`; `BootFrameAllocator` has no reclamation API. Do not add partial frame reclamation to 0.0.6. |
+| 2 | `BootFrameAllocator`'s frame iteration (`nth(self.next)`) re-walks from the start of the region iterator on every allocation, O(n) per allocation and O(n²) cumulative. Allocation volume remains low before heap work; this is performance cleanup, not a current correctness defect. | Deferred to 0.0.7 | `BootFrameAllocator` implementation; no measured 0.0.6 regression. |
+| 3 | Existing CPL3 fault scenarios do not all assert every possible detail such as exact fault RIP; the CPL3 supervisor-page scenario does verify its expected address and error-code bits, and the new CPL0 test asserts its origin and full required protection-fault classification. | P2 / follow-up | Review of `interrupts.rs` expected-fault matchers; no release-blocking defect identified. |
+| 4 | CodeQL's Rust analysis check name should be observed across additional real PRs before adding it to the required-status-check list. | Informational | `docs/security/github-configuration.md` intentionally excludes it pending repeated GitHub-side confirmation. |
+| 5 | Several transitive dependencies have duplicate major/minor versions (`bitflags`, `getrandom`, `syn`) and are reported by `cargo deny check` as warnings under the configured policy. | Informational | `deny.toml` permits multiple versions as warnings. |
 
 ## Verification method
+
+### Paging-hardening update verification
+
+The following checks were run for this update:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed |
+| `cargo clippy -p kernel --locked --target x86_64-unknown-none -- -D warnings` | Passed |
+| `cargo clippy -p pvkernel-runner --locked -- -D warnings` | Passed |
+| `cargo test --locked` | Passed (the runner reports 0 unit tests) |
+| `cargo check --locked --features "qemu-test supervisor-write-protection-test"` | Passed |
+| `cargo check --locked --features supervisor-write-protection-test` | Passed |
+| Builds for the new scenario and existing expected-page-fault, post-unmap, CPL3 privilege, CPL3 supervisor-memory, and syscall QEMU feature sets | Passed |
+| QEMU execution of the memory/fault scenarios | Not run locally: `qemu-system-x86_64` is not installed; CI now includes `QEMU / supervisor write protection` alongside the existing scenarios |
+| `git diff --check` | Passed |
+
+No dependency manifests or lockfiles were changed. The QEMU behavior remains
+to be confirmed by the repository's GitHub Actions run after push.
 
 Every "Verified" claim above reflects an actual command run against this
 repository during this session (see the final report's verification

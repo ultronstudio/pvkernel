@@ -103,16 +103,31 @@ This can be combined with the existing tests, for example:
 timeout 60 cargo run --features "qemu-test fault-tests mem-fault-tests" -- --headless-test
 ```
 
-## Why no write-protection (CR0.WP) test in 0.0.5
+## Supervisor write-protection test (`supervisor-write-protection-test`)
 
-The permission model already supports marking a mapping read-only
-(`Permissions::KERNEL_READ_ONLY`, exercised as step 5 of the boot smoke
-test above), and CR0.WP is enabled by the bootloader by the time
-`kernel_main` runs. A dedicated "write to a read-only page deliberately
-faults" deterministic test — mirroring the post-unmap test's structure —
-is intentionally left as future work rather than adding a third boot-time
-fault scenario in this milestone; see
-[docs/architecture/virtual-memory.md](../architecture/virtual-memory.md#future-work-and-known-limitations).
+This test maps a present, supervisor-only, read-only, non-executable page,
+then deliberately writes to it from CPL0. The page-fault handler accepts
+only a fault at the expected address with the present/protection-violation
+and write bits set, the user-mode and instruction-fetch bits clear, and a
+CPL0 origin. If the write succeeds or a different fault occurs, the test
+fails. `memory::init` also establishes CR0.WP before paging initialization,
+so the test exercises the architectural invariant rather than test-only
+configuration.
+
+Build the scenario with:
+
+```bash
+cargo build --features supervisor-write-protection-test
+```
+
+Run the deterministic QEMU test with:
+
+```bash
+timeout 60 cargo run --features "qemu-test supervisor-write-protection-test" -- --headless-test
+```
+
+The CI workflow runs this scenario alongside the paging and CPL3 fault
+tests.
 
 ## CI integration
 
