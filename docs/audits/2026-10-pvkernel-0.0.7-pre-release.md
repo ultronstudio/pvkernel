@@ -60,11 +60,12 @@ frame-map rescans are gone. All ten deterministic QEMU scenarios and the
 requested local validation commands passed, apart from the known Windows
 hostile-filename fixture limitation in the Python unit suite.
 
-Three P2 release-process/defensive-hardening observations remain. They do not
-prevent an RC when the operator selects and verifies the exact `main` commit,
-but should be considered before relying on this workflow for stable release.
-The recommendation is **CONDITIONALLY READY** for `v0.0.7-rc.1`, subject to
-the dispatch checks described below. This is not stable-release approval.
+At the time of this audit, three P2 release-process/defensive-hardening
+observations remained. The RC dispatch observation was subsequently resolved
+before RC1 by commit `1a92cd557a6b7106022284d48b3641a62e862a91`; two P2
+follow-ups remain. The recommendation at the audited commit was
+**CONDITIONALLY READY** for `v0.0.7-rc.1`, subject to the dispatch checks
+described below. This is not stable-release approval.
 
 ## Architecture changes since 0.0.6
 
@@ -302,12 +303,13 @@ Both workflows validate version inputs and package versions, require a
 committed lockfile and changelog entry, verify the dated toolchain, and refuse
 to overwrite an existing tag/release. Stable release additionally compares
 the operator-confirmed full SHA to `github.sha` and reruns CI/security against
-that checked-out commit. The RC workflow builds/tests/packages the exact
-selected workflow-dispatch commit and records that SHA in the release
-manifest and provenance, but it does not require that selected ref to be
-`main` or ask for a separate SHA confirmation. This manual-dispatch operator
-risk is recorded as P2; for RC1, dispatch only from `main` and verify the
-manifest commit equals the intended merge commit.
+that checked-out commit. At the audited commit, the RC workflow built,
+tested, and packaged the selected workflow-dispatch commit and recorded that
+SHA in the release manifest and provenance, but did not require that selected
+ref to be `main` or ask for a separate SHA confirmation. Commit
+`1a92cd557a6b7106022284d48b3641a62e862a91` adds both checks and passes the
+validated SHA explicitly to release creation. For RC1, dispatch from `main`
+and enter its exact full SHA.
 
 The shared artifact action builds the release ELF and UEFI image, emits a
 workspace/Cargo.lock SPDX SBOM (not a binary SBOM), writes `SHA256SUMS` and a
@@ -373,7 +375,7 @@ security boundary. Release CI includes executable heap tests.
 
 ### P2
 
-#### PVK-007-AUDIT-001 — RC dispatch does not constrain the selected ref
+#### PVK-007-AUDIT-001 — RC dispatch did not constrain the selected ref
 
 **ID:** PVK-007-AUDIT-001
 
@@ -381,7 +383,7 @@ security boundary. Release CI includes executable heap tests.
 
 **Component:** `.github/workflows/release-candidate.yml`
 
-**Status:** Open / manual operator control
+**Status:** Resolved before RC1 by `1a92cd557a6b7106022284d48b3641a62e862a91`
 
 **Description:** `workflow_dispatch` accepts version and RC number but does
 not assert `github.ref` is `refs/heads/main` or compare an operator-entered
@@ -395,12 +397,12 @@ remaining risk is accidentally publishing an RC from an unmerged branch.
 `github.sha`, and `gh release create --target` uses that same SHA; no branch
 or commit guard is present in RC validation.
 
-**Recommendation:** Restrict RC dispatch to `main` or add a full commit input
-and equality check. Until then, select `main` and compare the artifact
-manifest SHA with the intended commit before publishing/accepting RC1.
+**Resolution:** RC dispatch now requires `refs/heads/main`, validates a
+lowercase full 40-character commit SHA against both `github.sha` and the
+checked-out `HEAD`, and passes that validated SHA to release creation.
 
-**Release blocking:** No for RC1 when the documented operator check is
-followed; should be hardened before automating RC dispatch.
+**Release blocking:** Resolved before RC1; hosted workflow checks remain
+required before dispatch.
 
 #### PVK-007-AUDIT-002 — deallocation cannot distinguish same-unit Layout sizes
 
@@ -595,11 +597,12 @@ upper destructive test does not leave an unverified mapping invariant.
 
 ## Release recommendation
 
-**CONDITIONALLY READY — no P0/P1 findings; three P2 follow-ups remain.**
+**CONDITIONALLY READY at the audited commit — no P0/P1 findings; three P2
+follow-ups were recorded.**
 
-An operator may proceed to `v0.0.7-rc.1` after human review of this audit PR,
-dispatching the RC workflow from `main` and verifying the release manifest's
-`git_commit` is the intended merged commit. The exact commit will be tested,
-packaged, and attested by that workflow. Before stable release, decide whether
-to harden the RC branch guard, exact invalid-layout detection, and independent
-Environment approval policy. No finding here authorizes stable publication.
+The RC dispatch follow-up was resolved in commit
+`1a92cd557a6b7106022284d48b3641a62e862a91`; two P2 follow-ups remain: exact
+invalid-layout detection and the stable Environment approval policy. After
+human review and merge of the hardening PR, RC1 can be dispatched from `main`
+with its exact SHA. The RC workflow will test, package, and attest that commit.
+No finding here authorizes stable publication.
