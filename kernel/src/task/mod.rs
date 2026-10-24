@@ -93,8 +93,8 @@ pub enum SpawnError {
     TaskTableFull,
     NoTaskStackAvailable,
     QueueFull,
-    InvalidUserContext,
     NotPrepared,
+    #[allow(dead_code)] // The QEMU-only config omits the process publication entry point.
     ProcessNotAlive,
     ProcessAddressSpaceMismatch,
     InvalidTask,
@@ -441,6 +441,7 @@ pub(crate) fn prepare_user_task(
 /// scheduler then process table; IF remains clear through Process Alive and
 /// ready-queue publication, so neither timer scheduling nor another kernel
 /// observer can see an intermediate state on this single CPU.
+#[allow(dead_code)] // Used by the release smoke path, omitted in qemu-test-only builds.
 pub(crate) fn publish_prepared_user_task(id: TaskId) -> Result<(), SpawnError> {
     let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
     interrupts::without_interrupts(|| {
@@ -518,6 +519,7 @@ pub fn run_prepared_user_task_test() {
     kprintln!("[scheduler-test] prepared user task remains non-runnable until process Alive");
 }
 
+#[cfg(any(feature = "qemu-test", feature = "process-capacity-test"))]
 pub fn cancel_prepared_task(id: TaskId) -> Result<(), SpawnError> {
     let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
     interrupts::without_interrupts(|| {
@@ -536,6 +538,7 @@ pub fn cancel_prepared_task(id: TaskId) -> Result<(), SpawnError> {
     })
 }
 
+#[cfg(feature = "qemu-test")]
 pub fn task_kind(id: TaskId) -> Option<TaskKind> {
     let scheduler = SCHEDULER.get()?;
     interrupts::without_interrupts(|| {
@@ -1030,17 +1033,17 @@ pub fn wait_for_release_userspace_smoke() {
         .get()
         .expect("release smoke process was not prepared");
     loop {
-        if let Ok(snapshot) = process::snapshot(process_id) {
-            if snapshot.state == process::ProcessState::Zombie {
-                match snapshot.exit_reason {
-                    Some(ProcessExitReason::Exited { status: 0 }) => {
-                        kprintln!("[process] userspace smoke exited cleanly");
-                        process::reap(process_id).expect("could not reap release smoke process");
-                        kprintln!("[process] userspace smoke passed");
-                        return;
-                    }
-                    reason => panic!("release userspace smoke failed: {reason:?}"),
+        if let Ok(snapshot) = process::snapshot(process_id)
+            && snapshot.state == process::ProcessState::Zombie
+        {
+            match snapshot.exit_reason {
+                Some(ProcessExitReason::Exited { status: 0 }) => {
+                    kprintln!("[process] userspace smoke exited cleanly");
+                    process::reap(process_id).expect("could not reap release smoke process");
+                    kprintln!("[process] userspace smoke passed");
+                    return;
                 }
+                reason => panic!("release userspace smoke failed: {reason:?}"),
             }
         }
         hlt();
@@ -1388,39 +1391,39 @@ pub fn wait_for_process_smoke_test() {
         .get()
         .expect("process-smoke identity was not initialized");
     while PROCESS_SMOKE_ACTIVE.load(Ordering::Acquire) {
-        if let Ok(snapshot) = process::snapshot(process_id) {
-            if snapshot.state == process::ProcessState::Zombie {
-                assert!(
-                    snapshot.cpu_ticks > 0,
-                    "process CPU accounting did not advance"
-                );
-                assert!(process::snapshot_all().iter().flatten().any(|entry| {
-                    entry.id == process_id && entry.state == process::ProcessState::Zombie
-                }));
-                match snapshot.exit_reason {
-                    Some(ProcessExitReason::Exited { status: 0 }) => {
-                        kprintln!("[process-test] userspace getpid passed");
-                        kprintln!("[process-test] exit handoff reached Zombie safely");
-                        let old_pid = snapshot.pid;
-                        process::reap(process_id).expect("could not reap process-smoke Zombie");
-                        assert!(process::snapshot(process_id).is_err());
-                        let replacement = process::reserve(None, "reuse-check", pit::ticks())
-                            .expect("reaped process slot could not be reused");
-                        let replacement_snapshot = process::snapshot(replacement)
-                            .expect("replacement process snapshot missing");
-                        assert_eq!(replacement.slot(), process_id.slot());
-                        assert!(replacement.generation() > process_id.generation());
-                        assert_ne!(replacement_snapshot.pid, old_pid);
-                        process::abort_creation(replacement)
-                            .expect("could not roll back process ID reuse fixture");
-                        kprintln!("[process-test] stale ProcessId rejected after reuse");
-                        PROCESS_SMOKE_ACTIVE.store(false, Ordering::Release);
-                        crate::arch::x86_64::qemu::exit_success();
-                    }
-                    reason => {
-                        kprintln!("[process-test] process-smoke exit failed: {reason:?}");
-                        crate::arch::x86_64::qemu::exit_failure();
-                    }
+        if let Ok(snapshot) = process::snapshot(process_id)
+            && snapshot.state == process::ProcessState::Zombie
+        {
+            assert!(
+                snapshot.cpu_ticks > 0,
+                "process CPU accounting did not advance"
+            );
+            assert!(process::snapshot_all().iter().flatten().any(|entry| {
+                entry.id == process_id && entry.state == process::ProcessState::Zombie
+            }));
+            match snapshot.exit_reason {
+                Some(ProcessExitReason::Exited { status: 0 }) => {
+                    kprintln!("[process-test] userspace getpid passed");
+                    kprintln!("[process-test] exit handoff reached Zombie safely");
+                    let old_pid = snapshot.pid;
+                    process::reap(process_id).expect("could not reap process-smoke Zombie");
+                    assert!(process::snapshot(process_id).is_err());
+                    let replacement = process::reserve(None, "reuse-check", pit::ticks())
+                        .expect("reaped process slot could not be reused");
+                    let replacement_snapshot = process::snapshot(replacement)
+                        .expect("replacement process snapshot missing");
+                    assert_eq!(replacement.slot(), process_id.slot());
+                    assert!(replacement.generation() > process_id.generation());
+                    assert_ne!(replacement_snapshot.pid, old_pid);
+                    process::abort_creation(replacement)
+                        .expect("could not roll back process ID reuse fixture");
+                    kprintln!("[process-test] stale ProcessId rejected after reuse");
+                    PROCESS_SMOKE_ACTIVE.store(false, Ordering::Release);
+                    crate::arch::x86_64::qemu::exit_success();
+                }
+                reason => {
+                    kprintln!("[process-test] process-smoke exit failed: {reason:?}");
+                    crate::arch::x86_64::qemu::exit_failure();
                 }
             }
         }

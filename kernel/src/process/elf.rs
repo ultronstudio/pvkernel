@@ -208,12 +208,11 @@ fn validate(bytes: &[u8]) -> Result<ElfPlan, ElfError> {
         if virtual_start < crate::arch::x86_64::memory::USER_MIN {
             return Err(ElfError::OutsideUserRange);
         }
-        if alignment > 1 {
-            if !alignment.is_power_of_two()
-                || virtual_start % alignment != file_offset_u64 % alignment
-            {
-                return Err(ElfError::InvalidAlignment);
-            }
+        if alignment > 1
+            && (!alignment.is_power_of_two()
+                || virtual_start % alignment != file_offset_u64 % alignment)
+        {
+            return Err(ElfError::InvalidAlignment);
         }
         let page_start = virtual_start & !(Size4KiB::SIZE - 1);
         let page_end = memory_end
@@ -266,7 +265,7 @@ fn validate(bytes: &[u8]) -> Result<ElfPlan, ElfError> {
     if VirtAddr::try_new(entry).is_err() {
         return Err(ElfError::NonCanonicalAddress);
     }
-    if entry < ELF_MIN || entry >= ELF_MAX {
+    if !(ELF_MIN..ELF_MAX).contains(&entry) {
         return Err(ElfError::InvalidEntry);
     }
     if !entry_executable {
@@ -385,13 +384,13 @@ fn cleanup(address_space: &mut AddressSpace, kernel: &mut KernelAddressSpace, pl
     for segment in plan.segments[..plan.segment_count].iter().flatten() {
         let mut address = segment.page_start;
         while address < segment.page_end {
-            if let Ok(page) = Page::<Size4KiB>::from_start_address(VirtAddr::new(address)) {
-                if !matches!(
+            if let Ok(page) = Page::<Size4KiB>::from_start_address(VirtAddr::new(address))
+                && !matches!(
                     address_space.translate(kernel, VirtAddr::new(address)),
                     Ok(Translation::NotMapped)
-                ) {
-                    let _ = address_space.unmap_user_page(kernel, page);
-                }
+                )
+            {
+                let _ = address_space.unmap_user_page(kernel, page);
             }
             let Some(next) = address.checked_add(Size4KiB::SIZE) else {
                 break;
@@ -631,6 +630,10 @@ fn test_elf() -> alloc::vec::Vec<u8> {
 /// Builds the embedded process-exit smoke ELF with its expected PID baked
 /// into the test code. This is a deterministic QEMU fixture, not a loader
 /// shortcut or a production executable provider.
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "process-smoke-test"
+))]
 pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
     const ENTRY: u64 = 0x0040_0000;
     const FILE_OFFSET: usize = 0x1000;

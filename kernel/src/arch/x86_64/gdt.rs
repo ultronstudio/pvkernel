@@ -302,6 +302,7 @@ pub fn kernel_fallback_rsp0() -> VirtAddr {
 /// Reads the programmed privilege-transition stack top. Intended for
 /// diagnostics and deterministic architecture tests; scheduler callers still
 /// select only validated tops through the setters above.
+#[cfg(feature = "qemu-test")]
 pub fn current_rsp0() -> Result<u64, Rsp0Error> {
     let tss = TSS.get().ok_or(Rsp0Error::TssUnavailable)?;
     // SAFETY: RSP0 is a scalar read. Single-core execution and the existing

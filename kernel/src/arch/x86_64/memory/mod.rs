@@ -43,7 +43,9 @@ pub use address_space::{
     with_kernel_address_space,
 };
 pub use paging::{Permissions, Translation};
-pub use user_stack::{USER_STACK_PAGES, USER_STACK_SIZE, USER_STACK_TOP, UserStack};
+#[cfg(feature = "qemu-test")]
+pub use user_stack::USER_STACK_PAGES;
+pub use user_stack::{USER_STACK_SIZE, USER_STACK_TOP, UserStack};
 
 use frame_allocator::BootFrameAllocator;
 use paging::MemoryError;
