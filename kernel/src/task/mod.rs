@@ -1,3 +1,5 @@
+#[cfg(feature = "process-preemption-test")]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::{Mutex, Once};
@@ -147,6 +149,14 @@ impl Scheduler {
 }
 
 static SCHEDULER: Once<Mutex<Scheduler>> = Once::new();
+#[cfg(feature = "process-preemption-test")]
+static PROCESS_PREEMPTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "process-preemption-test")]
+static PROCESS_PREEMPTION_PROGRESS_A: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "process-preemption-test")]
+static PROCESS_PREEMPTION_PROGRESS_B: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "process-preemption-test")]
+static PROCESS_PREEMPTION_START_TICK: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A: AtomicU64 = AtomicU64::new(0);
 static SMOKE_B: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A_SP: AtomicU64 = AtomicU64::new(0);
@@ -519,7 +529,8 @@ pub fn task_state(id: TaskId) -> Option<TaskState> {
 
 /// Called only by the assembly IRQ0 boundary with IF cleared by the IDT
 /// interrupt gate. The pointer is the exact register+hardware frame created
-/// by `switch.rs`; CPL3 scheduling remains disabled until Phase G.
+/// by `switch.rs`. Legacy CPL3 tests run from the bootstrap context and retain
+/// their old non-scheduling behavior; process-owned user tasks are preempted.
 pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task::Context {
     pit::record_tick();
     // SAFETY: assembly passes the address of its just-saved register prefix;
@@ -529,14 +540,38 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
     if from_user {
         crate::arch::x86_64::syscall::test::TIMER_INTERRUPTED_CPL3.store(true, Ordering::Relaxed);
     }
-    if from_user {
-        pic::notify_end_of_interrupt(IrqLine::Timer);
-        return context;
-    }
-
     let scheduler = SCHEDULER
         .get()
         .expect("timer IRQ before scheduler initialization");
+    #[cfg(feature = "process-preemption-test")]
+    match process_preemption_test_result() {
+        Some(true) => {
+            kprintln!("[process-test] user A and user B both made progress");
+            kprintln!("[process-test] CPL3 timer preemption passed");
+            pic::notify_end_of_interrupt(IrqLine::Timer);
+            crate::arch::x86_64::qemu::exit_success();
+        }
+        Some(false) => {
+            kprintln!("[process-test] CPL3 preemption tick watchdog expired");
+            pic::notify_end_of_interrupt(IrqLine::Timer);
+            crate::arch::x86_64::qemu::exit_failure();
+        }
+        None => {}
+    }
+    if from_user {
+        let process_task_running = interrupts::without_interrupts(|| {
+            let scheduler = scheduler.lock();
+            scheduler.current.is_some()
+        });
+        // Historical CPL3 syscall tests enter directly from bootstrap, not
+        // through a process Task. Preserve that test context; a real user
+        // process always has a current User task.
+        if !process_task_running {
+            pic::notify_end_of_interrupt(IrqLine::Timer);
+            return context;
+        }
+    }
+
     let plan = interrupts::without_interrupts(|| {
         let mut scheduler = scheduler.lock();
         assert!(
@@ -556,6 +591,11 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
                 assert!(
                     matches!(slot.state, TaskState::Running | TaskState::Exiting),
                     "current task not Running/Exiting"
+                );
+                assert_eq!(
+                    matches!(slot.kind, TaskKind::User(_)),
+                    from_user,
+                    "saved privilege does not match current task kind"
                 );
                 assert!(!slot.queued, "Running task appeared in queue");
                 slot.saved_rsp = context as u64;
@@ -816,6 +856,151 @@ pub fn run_preemption_test() {
     kprintln!("[scheduler-test] task B made progress");
     kprintln!("[scheduler-test] timer remained monotonic");
     kprintln!("[scheduler-test] preemption completed successfully");
+}
+
+#[cfg(feature = "process-preemption-test")]
+fn prepare_preemption_process(
+    name: &str,
+    shared_frame: Option<
+        x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>,
+    >,
+    process_b: bool,
+) -> (
+    ProcessId,
+    u64,
+    x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>,
+) {
+    use x86_64::structures::paging::{Page, PageSize, Size4KiB};
+
+    let process_id = process::reserve(None, name, pit::ticks())
+        .expect("failed to reserve process-preemption test process");
+    let (address_space, context, progress_alias, progress_frame) =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut address_space = kernel
+                .create_address_space()
+                .expect("failed to create process-preemption test root");
+            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                .expect("failed to map process-preemption user stack");
+
+            let code_page = Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(
+                crate::arch::x86_64::memory::USER_MIN,
+            ))
+            .expect("USER_MIN is not page aligned");
+            let progress_address = crate::arch::x86_64::memory::USER_MIN + Size4KiB::SIZE;
+            let progress_page =
+                Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(progress_address))
+                    .expect("progress page is not aligned");
+            address_space
+                .map_new_user_page(
+                    kernel,
+                    code_page,
+                    crate::arch::x86_64::memory::Permissions::USER_DATA,
+                )
+                .expect("failed to allocate user loop code page");
+            let progress_frame = if let Some(frame) = shared_frame {
+                address_space
+                    .map_test_shared_user_page(kernel, progress_page, frame)
+                    .expect("failed to map shared preemption-test progress page");
+                frame
+            } else {
+                address_space
+                    .map_new_user_page(
+                        kernel,
+                        progress_page,
+                        crate::arch::x86_64::memory::Permissions::USER_DATA,
+                    )
+                    .expect("failed to allocate user progress page")
+            };
+
+            // Trusted closed loop: increment this process's counter, test the
+            // peer's counter, set an observed-peer flag, and repeat. Neither
+            // payload invokes a syscall or yields voluntarily.
+            let mut code = [0u8; 30];
+            code[0..2].copy_from_slice(&[0x48, 0xB8]);
+            let own_counter = progress_address + if process_b { 8 } else { 0 };
+            code[2..10].copy_from_slice(&own_counter.to_le_bytes());
+            code[10..13].copy_from_slice(&[0x48, 0xFF, 0x00]);
+            let peer_offset = if process_b { 0xF8 } else { 0x08 };
+            code[13..20].copy_from_slice(&[0x48, 0x83, 0x78, peer_offset, 0x01, 0x72, 0xF6]);
+            code[20..28].copy_from_slice(&[0x48, 0xC7, 0x40, 0x10, 0x01, 0, 0, 0]);
+            code[28..30].copy_from_slice(&[0xEB, 0xEC]);
+            address_space
+                .write_user_page(kernel, code_page, 0, &code)
+                .expect("failed to write process-preemption test payload");
+            address_space
+                .update_user_permissions(
+                    kernel,
+                    code_page,
+                    crate::arch::x86_64::memory::Permissions::USER_CODE,
+                )
+                .expect("failed to make test code RX");
+            let progress_alias = address_space
+                .test_user_page_kernel_alias(kernel, progress_page)
+                .expect("failed to obtain progress page supervisor alias")
+                .as_u64();
+            let context = address_space
+                .validate_user_context(
+                    kernel,
+                    crate::arch::x86_64::memory::USER_MIN,
+                    crate::arch::x86_64::memory::USER_STACK_TOP,
+                )
+                .expect("process-preemption user context failed validation");
+            (address_space, context, progress_alias, progress_frame)
+        });
+    process::install_address_space(process_id, address_space)
+        .expect("failed to attach process-preemption address space");
+    let task_id = prepare_user_task(process_id, context)
+        .expect("failed to prepare process-preemption user task");
+    process::install_primary_task(process_id, task_id)
+        .expect("failed to attach process-preemption task");
+    publish_prepared_user_task(task_id).expect("failed to publish process-preemption task");
+    (process_id, progress_alias, progress_frame)
+}
+
+/// Adds two non-yielding CPL3 loops to the ready queue. The PIT handler
+/// reports QEMU success only after both independent user pages advanced.
+#[cfg(feature = "process-preemption-test")]
+pub fn prepare_process_preemption_test() {
+    PROCESS_PREEMPTION_ACTIVE.store(false, Ordering::Relaxed);
+    let (_, alias_a, progress_frame) = prepare_preemption_process("preempt-a", None, false);
+    let (_, alias_b, _) = prepare_preemption_process("preempt-b", Some(progress_frame), true);
+    PROCESS_PREEMPTION_PROGRESS_A.store(alias_a, Ordering::Relaxed);
+    PROCESS_PREEMPTION_PROGRESS_B.store(alias_b, Ordering::Relaxed);
+    PROCESS_PREEMPTION_START_TICK.store(pit::ticks(), Ordering::Relaxed);
+    PROCESS_PREEMPTION_ACTIVE.store(true, Ordering::Release);
+    kprintln!("[process-test] two non-yielding user loops queued");
+}
+
+#[cfg(feature = "process-preemption-test")]
+pub fn wait_for_process_preemption_test() {
+    while PROCESS_PREEMPTION_ACTIVE.load(Ordering::Acquire) {
+        hlt();
+    }
+}
+
+#[cfg(feature = "process-preemption-test")]
+fn process_preemption_test_result() -> Option<bool> {
+    if !PROCESS_PREEMPTION_ACTIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let alias_a = PROCESS_PREEMPTION_PROGRESS_A.load(Ordering::Relaxed);
+    let alias_b = PROCESS_PREEMPTION_PROGRESS_B.load(Ordering::Relaxed);
+    if alias_a == 0 || alias_b == 0 {
+        return None;
+    }
+    // Both processes map this zeroed test page at the same user VA. Their
+    // closed loops set distinct flags only after reading the peer's counter.
+    // SAFETY: aliases refer to the allocator-owned page captured during
+    // Creating; IF is clear and only the trusted test loops write these
+    // aligned qwords. Each offset remains inside the page.
+    let process_a_saw_b = unsafe { ((alias_a + 16) as *const u64).read_volatile() };
+    // SAFETY: alias_b denotes the same mapped page and +24 is still in-page.
+    let process_b_saw_a = unsafe { ((alias_b + 24) as *const u64).read_volatile() };
+    if process_a_saw_b != 0 && process_b_saw_a != 0 {
+        return Some(true);
+    }
+    (pit::ticks().saturating_sub(PROCESS_PREEMPTION_START_TICK.load(Ordering::Relaxed)) >= 100)
+        .then_some(false)
 }
 
 #[cfg(feature = "task-capacity-test")]

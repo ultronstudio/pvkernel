@@ -127,6 +127,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::interrupts::run_breakpoint_test();
 
     let scheduler_smoke_tasks = task::prepare_smoke_test();
+    #[cfg(feature = "process-preemption-test")]
+    task::prepare_process_preemption_test();
 
     let ticks_before = pit::ticks();
     kprintln!("[test] waiting for timer interrupts");
@@ -140,6 +142,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     pit::wait_for_ticks(TIMER_TEST_TICKS);
     task::run_smoke_test(scheduler_smoke_tasks.0, scheduler_smoke_tasks.1);
+
+    #[cfg(feature = "process-preemption-test")]
+    task::wait_for_process_preemption_test();
 
     #[cfg(feature = "scheduler-preemption-test")]
     task::run_preemption_test();
