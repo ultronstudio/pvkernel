@@ -329,6 +329,50 @@ pub fn run_address_space_smoke_test() {
     kprintln!("[process-test] inactive roots, isolation, and shared kernel mappings passed");
 }
 
+/// Loads each process root on the CPU and reads the same user VA through the
+/// active translation. The kernel stack/code/globals remain live because the
+/// audited upper-half PML4 entries are identical. This test runs with IF=0
+/// inside `with_kernel_address_space`; it does not schedule user contexts.
+#[cfg(feature = "qemu-test")]
+pub fn run_address_space_switch_smoke_test() {
+    use x86_64::structures::paging::{Page, Size4KiB};
+
+    kprintln!("[process-test] checking runtime CR3 address-space switches");
+    with_kernel_address_space(|kernel| {
+        let mut a = kernel
+            .create_address_space()
+            .expect("failed to create CR3 test root A");
+        let mut b = kernel
+            .create_address_space()
+            .expect("failed to create CR3 test root B");
+        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(USER_MIN))
+            .expect("USER_MIN must be page aligned");
+        a.map_new_user_page(kernel, page, Permissions::USER_DATA)
+            .expect("failed to map CR3 test page A");
+        b.map_new_user_page(kernel, page, Permissions::USER_DATA)
+            .expect("failed to map CR3 test page B");
+        a.write_user_page(kernel, page, 0, &[0xAA])
+            .expect("failed to initialize CR3 test page A");
+        b.write_user_page(kernel, page, 0, &[0xBB])
+            .expect("failed to initialize CR3 test page B");
+
+        for (space, expected) in [(&a, 0xAA), (&b, 0xBB), (&a, 0xAA), (&b, 0xBB)] {
+            kernel
+                .activate_address_space(space)
+                .expect("audited process CR3 activation failed");
+            // SAFETY: the selected root maps USER_MIN to a zeroed frame
+            // populated above; CPL0 may read a user page, the upper-half
+            // mapping audit preserves this code and stack, and IF is clear.
+            let actual = unsafe { VirtAddr::new(USER_MIN).as_ptr::<u8>().read_volatile() };
+            assert_eq!(actual, expected, "active CR3 exposed another process page");
+        }
+        kernel
+            .activate_kernel_root()
+            .expect("failed to restore kernel CR3 after smoke test");
+    });
+    kprintln!("[process-test] runtime CR3 switching and same-VA isolation passed");
+}
+
 #[cfg(feature = "qemu-test")]
 pub fn run_user_stack_smoke_test() {
     use x86_64::structures::paging::{Page, PageSize, PageTableFlags, Size4KiB};

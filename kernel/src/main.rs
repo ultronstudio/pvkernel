@@ -97,6 +97,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "qemu-test")]
     arch::x86_64::memory::run_address_space_smoke_test();
     #[cfg(feature = "qemu-test")]
+    arch::x86_64::memory::run_address_space_switch_smoke_test();
+    #[cfg(feature = "qemu-test")]
     task::run_prepared_user_task_test();
     #[cfg(feature = "qemu-test")]
     arch::x86_64::memory::run_user_stack_smoke_test();

@@ -10,7 +10,7 @@
 use spin::{Mutex, Once};
 use x86_64::{
     PhysAddr, VirtAddr,
-    registers::control::Cr3,
+    registers::control::{Cr3, Cr3Flags},
     structures::paging::{
         FrameAllocator, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags, PhysFrame,
         Size4KiB,
@@ -358,10 +358,77 @@ pub struct KernelAddressSpace {
     physical_memory_offset: VirtAddr,
     boot_mappings: BootMappingInventory,
     kernel_root: PhysFrame<Size4KiB>,
+    kernel_root_flags: Cr3Flags,
     boot_mapping_audited: bool,
 }
 
 impl KernelAddressSpace {
+    /// Loads a process root only after proving that its kernel-half PML4
+    /// entries exactly match the currently audited kernel root. This keeps
+    /// the active kernel stack, switch code, globals, GDT, IDT and TSS mapped
+    /// at identical supervisor-only VAs across the load.
+    pub fn activate_address_space(
+        &mut self,
+        address_space: &AddressSpace,
+    ) -> Result<(), AddressSpaceError> {
+        if x86_64::instructions::interrupts::are_enabled() {
+            return Err(AddressSpaceError::UnsafeKernelMapping);
+        }
+        if !self.boot_mapping_audited {
+            return Err(AddressSpaceError::UnsafeKernelMapping);
+        }
+        self.verify_live_kernel_mappings()
+            .map_err(|_| AddressSpaceError::KernelMappingMissing)?;
+        self.verify_kernel_clone(address_space)?;
+        // SAFETY: the root is owned by AddressSpace, four-level paging was
+        // validated at boot, the exact supervisor kernel PML4 mappings were
+        // compared immediately above, and IF is clear through the call.
+        unsafe { Cr3::write(address_space.root, self.kernel_root_flags) };
+        Ok(())
+    }
+
+    /// Restores the audited kernel root. Used on the return-to-kernel side of
+    /// a switch plan and by root-switch validation tests.
+    pub fn activate_kernel_root(&mut self) -> Result<(), AddressSpaceError> {
+        if x86_64::instructions::interrupts::are_enabled() {
+            return Err(AddressSpaceError::UnsafeKernelMapping);
+        }
+        self.verify_live_kernel_mappings()
+            .map_err(|_| AddressSpaceError::KernelMappingMissing)?;
+        // SAFETY: kernel_root is the root captured from CR3 at validated
+        // initialization; its mapping tree is audited, and IF is clear.
+        unsafe { Cr3::write(self.kernel_root, self.kernel_root_flags) };
+        Ok(())
+    }
+
+    fn verify_kernel_clone(&self, address_space: &AddressSpace) -> Result<(), AddressSpaceError> {
+        let alias = self.physical_alias(address_space.root.start_address())?;
+        // SAFETY: the root frame is privately owned by this AddressSpace,
+        // mapped through the audited supervisor physical map, and read-only
+        // for this verification while the kernel address-space lock is held.
+        let process_root = unsafe { &*alias.as_ptr::<PageTable>() };
+        let kernel_root = self.mapper.level_4_table();
+        for index in 256..512 {
+            let expected = &kernel_root[index];
+            let actual = &process_root[index];
+            let expected_present = expected.flags().contains(PageTableFlags::PRESENT);
+            let actual_present = actual.flags().contains(PageTableFlags::PRESENT);
+            let hardware_flags = !PageTableFlags::ACCESSED;
+            if expected_present != actual_present
+                || expected_present
+                    && (expected.addr() != actual.addr()
+                        // Accessed is hardware-managed independently in each
+                        // root even when the two entries name the same tree.
+                        || expected.flags() & hardware_flags
+                            != actual.flags() & hardware_flags
+                        || actual.flags().contains(PageTableFlags::USER_ACCESSIBLE))
+            {
+                return Err(AddressSpaceError::UnsafeKernelMapping);
+            }
+        }
+        Ok(())
+    }
+
     /// Creates an inactive address-space root by cloning the already-audited
     /// supervisor-only upper half. Lower-half bootloader mappings are never
     /// copied into a process root.
@@ -1042,13 +1109,14 @@ pub(super) fn init(
         // requires.
         let mapper = unsafe { OffsetPageTable::new(level_4_table, phys_mem_offset) };
 
-        let (kernel_root, _) = Cr3::read();
+        let (kernel_root, kernel_root_flags) = Cr3::read();
         let mut space = KernelAddressSpace {
             mapper,
             frame_allocator,
             physical_memory_offset: phys_mem_offset,
             boot_mappings,
             kernel_root,
+            kernel_root_flags,
             boot_mapping_audited: false,
         };
         space
