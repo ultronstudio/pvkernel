@@ -10,6 +10,9 @@ has an audited CR3 activation primitive, a Rust scheduler SwitchPlan, and a
 QEMU runtime root-switch/RSP0 smoke. Phase G now schedules process-owned CPL3
 timer frames and has a deterministic two-process preemption test; legacy
 direct-from-bootstrap CPL3 boundary tests retain their non-scheduling path.
+Phase H adds process-aware `getpid` and terminal `exit`, with deferred Zombie
+publication after the outgoing kernel stack becomes inactive; an embedded
+ELF smoke checks PID identity and non-returning exit.
 
 ## 1. Scope and goals
 
@@ -482,12 +485,15 @@ handoff.
 ## 21. Syscall policy and initial surface
 
 Keep provisional `int 0x80`, with no SYSCALL/SYSRET migration. Interrupt-gate
-entry clears IF, so the maskable PIT cannot preempt syscall Rust code; this
-already gives the recommended non-preemptible syscall policy. Preserve it.
-Only initial process-aware calls are `exit(status)` (does not return) and
-`getpid()`. Process creation stays an internal kernel/test operation. Do
-not add fork, exec/spawn, open/read/write, mmap, brk, signals or filesystem
-calls.
+entry clears IF, so the maskable PIT cannot preempt ordinary syscall Rust
+code. `getpid()` returns the PID only when the current scheduler Task is a
+Running user Task; bootstrap CPL3 tests get `InvalidContext`. `exit(status)`
+marks the Process and Task Exiting, releases locks, then uses the explicit
+STI;HLT handoff. The next PIT saves the outgoing frame and switches away;
+Zombie is published only on a later interrupt after the old kernel stack is
+inactive. The embedded smoke ELF verifies getpid and that exit does not
+return. Process creation stays an internal kernel/test operation. Do not add
+fork, exec/spawn, open/read/write, mmap, brk, signals or filesystem calls.
 
 ## 22. User-copy design
 
@@ -583,9 +589,10 @@ User faults follow the same terminal sequence: capture trusted scalar
 `Fault(...)` metadata, mark Process and Task Exiting, release locks, then
 permit the timer handoff. No path returns to the faulting RIP. The scheduler
 records pending completion when it saves the exiting context, but Process
-becomes Zombie only after a post-stack-adoption hook/continuation confirms
-the old kernel stack is inactive. Do not release its root or stack before
-then. An internal reaper accepts only Zombie with no executing task, changes
+becomes Zombie only when a subsequent timer entry runs on the newly adopted
+context's stack; this deferred completion proves the old kernel stack is
+inactive. Do not release its root or stack before then. An internal reaper
+accepts only Zombie with no executing task, changes
 it to Vacant (making the old ProcessId invalid immediately), and removes
 metadata. Generation advances only on a later reservation; PID is never
 recycled. Public waitpid is not required now.
@@ -648,7 +655,7 @@ continued kernel activity are observed.
 
 | Scenario | Setup / purpose | Required success; failure |
 |---|---|---|
-| `process-smoke-test` | Embedded ELF enters CPL3, getpid, exit | deterministic entered/PID/exited markers; timeout/panic fails |
+| `process-smoke-test` | Embedded ELF enters CPL3, checks getpid, calls exit, then contains UD2 sentinel | Zombie retains status 0, sentinel never executes, kernel reaps, QEMU passes; PIT watchdog fails otherwise |
 | `process-preemption-test` | Two non-yielding CPL3 loops increment separate counters on a test-only shared page and set peer-observed flags | PIT handler passes only after both peer-observed flags are set; tick watchdog fails otherwise |
 | `address-space-isolation-test` | A/B map same VA to different frames with AA/BB and alternate repeatedly | each always sees own value over A→B→A; tests CR3/TLB/scheduler |
 | `user-stack-guard-fault-test` | User writes below mapped stack | process fault recorded, kernel continues |
