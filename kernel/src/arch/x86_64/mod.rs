@@ -38,14 +38,14 @@ const PIT_TARGET_HZ: u32 = 100;
 /// this function, so that once `boot_info` is moved in here, nothing in the
 /// kernel retains any other way to reach it. See [`memory::init`] for why
 /// that matters.
-pub fn init(boot_info: &'static mut BootInfo) {
+pub fn init(boot_info: &'static mut BootInfo, framebuffer_mapping: Option<(u64, u64)>) {
     x86_64::instructions::interrupts::disable();
     crate::kprintln!("[cpu] maskable hardware interrupts disabled");
 
     gdt::init();
     interrupts::init();
 
-    memory::init(boot_info);
+    memory::init(boot_info, framebuffer_mapping);
 
     pic::initialize();
     pic::mask_all();

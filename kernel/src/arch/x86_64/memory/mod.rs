@@ -64,6 +64,20 @@ pub const TEMP_MAPPING_BASE: u64 = 0xFFFF_9000_0000_0000;
 #[cfg_attr(not(feature = "userspace-test"), allow(dead_code))]
 pub const USERSPACE_RANGE_BASE: u64 = 0x0000_6000_0000_0000;
 
+/// First accepted address for process mappings; the first 64 KiB stays unmapped.
+pub const USER_MIN: u64 = 0x0000_0000_0001_0000;
+/// Exclusive upper bound for the lower canonical userspace half.
+pub const USER_MAX: u64 = 0x0000_8000_0000_0000;
+
+/// PML4 index 256: first upper-half slot reserved for bootloader dynamics.
+pub const BOOTLOADER_DYNAMIC_START: u64 = 0xffff_8000_0000_0000;
+/// Exclusive boundary before PML4 index 288, where pvKernel's explicit
+/// scratch, heap, and task-stack mappings begin.
+pub const BOOTLOADER_DYNAMIC_END: u64 = 0xffff_9000_0000_0000;
+/// The bootloader rounds its dynamic-range end to PML4 entries. This page
+/// sentinel makes it reserve index 288 onward and leave indices 256..287.
+pub const BOOTLOADER_DYNAMIC_END_SENTINEL: u64 = BOOTLOADER_DYNAMIC_END - 4096;
+
 /// Placeholder [`MemoryRegions`] used only to give
 /// `BootInfo::memory_regions` a valid value to hold once [`init`] has moved
 /// the real one out of it (see [`init`]). Always empty, and never read
@@ -101,7 +115,7 @@ static mut EMPTY_MEMORY_REGIONS: [MemoryRegion; 0] = [];
 /// misconfiguration, not an ordinary runtime condition; none of this
 /// module's operations are possible without it, so continuing would be
 /// unsafe.
-pub fn init(boot_info: &'static mut BootInfo) {
+pub fn init(boot_info: &'static mut BootInfo, framebuffer_mapping: Option<(u64, u64)>) {
     // Paging-mode prerequisites must hold before anything below interprets
     // CR3 as a four-level table root (`address_space::init` does, via
     // `active_level_4_table`/`OffsetPageTable::new`).
@@ -112,6 +126,51 @@ pub fn init(boot_info: &'static mut BootInfo) {
         .into_option()
         .expect("bootloader did not provide a physical-memory offset mapping");
     let phys_mem_offset = VirtAddr::new(physical_memory_offset);
+    let max_physical_address = boot_info
+        .memory_regions
+        .iter()
+        .map(|region| region.end)
+        .max()
+        .unwrap_or(0)
+        .max(0x1_0000_0000);
+    let memory_regions_start = boot_info.memory_regions.as_ptr() as u64;
+    let memory_regions_len = boot_info
+        .memory_regions
+        .len()
+        .checked_mul(core::mem::size_of::<MemoryRegion>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .expect("boot memory-map byte length overflow");
+    let ramdisk = boot_info
+        .ramdisk_addr
+        .into_option()
+        .map(|start| address_space::MappingRange {
+            start,
+            len: boot_info.ramdisk_len,
+        });
+    let boot_mappings = address_space::BootMappingInventory {
+        kernel_image_base: boot_info.kernel_image_offset,
+        kernel_elf_physical: boot_info.kernel_addr,
+        kernel_elf_len: boot_info.kernel_len,
+        kernel_stack: address_space::MappingRange {
+            start: boot_info.kernel_stack_bottom,
+            len: boot_info.kernel_stack_len,
+        },
+        boot_info: address_space::MappingRange {
+            start: boot_info as *mut BootInfo as u64,
+            len: core::mem::size_of::<BootInfo>() as u64,
+        },
+        memory_regions: address_space::MappingRange {
+            start: memory_regions_start,
+            len: memory_regions_len,
+        },
+        physical_memory: address_space::MappingRange {
+            start: physical_memory_offset,
+            len: max_physical_address,
+        },
+        framebuffer: framebuffer_mapping
+            .map(|(start, len)| address_space::MappingRange { start, len }),
+        ramdisk,
+    };
 
     // Moves the real `MemoryRegions` out of `boot_info`, leaving the
     // always-empty placeholder in its place so the field stays valid. This
@@ -146,7 +205,7 @@ pub fn init(boot_info: &'static mut BootInfo) {
     let frame_allocator = unsafe { BootFrameAllocator::new(regions) };
     let usable_frames = frame_allocator.usable_frame_count();
 
-    address_space::init(phys_mem_offset, frame_allocator);
+    address_space::init(phys_mem_offset, frame_allocator, boot_mappings);
 
     kprintln!("[memory] physical frame allocator initialized");
     kprintln!(

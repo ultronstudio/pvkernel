@@ -34,6 +34,12 @@ use halt::idle_loop;
 const fn bootloader_config() -> BootloaderConfig {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Bootloader 0.11.17 chooses Mapping::Dynamic addresses from contiguous
+    // free PML4 entries. Keep every retained boot mapping in indices 256..287,
+    // wholly inside the kernel half and immediately below pvKernel's explicit
+    // index-288 mappings (scratch, heap and scheduler stacks).
+    config.mappings.dynamic_range_start = Some(arch::x86_64::memory::BOOTLOADER_DYNAMIC_START);
+    config.mappings.dynamic_range_end = Some(arch::x86_64::memory::BOOTLOADER_DYNAMIC_END_SENTINEL);
     config
 }
 
@@ -73,12 +79,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // This is what lets `kernel_main` keep using the framebuffer afterward
     // without retaining any other access to `boot_info`.
     let mut framebuffer = boot_info.framebuffer.take();
+    let framebuffer_mapping = framebuffer.as_mut().map(|buffer| {
+        let bytes = buffer.buffer_mut();
+        (bytes.as_mut_ptr() as u64, bytes.len() as u64)
+    });
 
     // `boot_info` is moved into `arch::init` here and not returned: after
     // this call, `kernel_main` has no further way to reach `BootInfo` (the
     // compiler enforces this, since `boot_info` is a `&'static mut`
     // reference and this function no longer has a live binding for it).
-    arch::init(boot_info);
+    arch::init(boot_info, framebuffer_mapping);
 
     arch::x86_64::memory::run_boot_smoke_test();
     arch::x86_64::memory::run_heap_smoke_tests();
