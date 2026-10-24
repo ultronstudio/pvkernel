@@ -5,8 +5,10 @@ stable-baseline sections describe pvKernel 0.0.8 at
 `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
-user-task/process-resource model are implemented on the 0.0.9 branch.
-Userspace scheduling and CR3 activation are not yet present.
+user-task/process-resource model are implemented on the 0.0.9 branch. Phase F
+has an audited CR3 activation primitive and a QEMU runtime root-switch smoke;
+the scheduler SwitchPlan and task-to-task address-space handoff are still
+pending. Userspace scheduling is not yet enabled.
 
 ## 1. Scope and goals
 
@@ -383,6 +385,14 @@ the executing kernel stack, switch assembly, scheduler state, GDT, IDT and
 TSS to remain mapped at identical VAs in the target. The mapping audit and
 clone verification establish that invariant; failure to establish it blocks
 process scheduling.
+
+Implementation note: `KernelAddressSpace::activate_address_space` checks IF=0,
+re-audits live kernel mappings, compares every upper PML4 entry with the
+kernel root (ignoring only the hardware-managed Accessed bit), and only then
+loads the process CR3. The QEMU runtime smoke alternates two roots whose
+`USER_MIN` pages contain `0xAA` and `0xBB`, reads through the active VA each
+time, then restores the kernel root. This proves root-load continuity and
+same-VA translation isolation; it does not yet prove scheduler handoff.
 
 ## 18. User and kernel stacks
 
