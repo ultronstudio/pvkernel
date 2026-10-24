@@ -4,12 +4,14 @@ use spin::{Mutex, Once};
 use x86_64::instructions::{hlt, interrupts};
 
 use crate::{
+    arch::x86_64::memory::ValidatedUserContext,
     arch::x86_64::{
         gdt,
         pic::{self, IrqLine},
         pit, task as arch_task,
     },
     kprintln,
+    process::{self, ProcessId},
 };
 
 pub const MAX_KERNEL_TASKS: usize = arch_task::MAX_KERNEL_TASKS;
@@ -33,6 +35,7 @@ impl TaskId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskState {
     Vacant,
+    Prepared,
     Ready,
     Running,
     Exiting,
@@ -41,17 +44,29 @@ pub enum TaskState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskKind {
+    Kernel,
+    User(ProcessId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpawnError {
     SchedulerNotInitialized,
     TaskTableFull,
     NoTaskStackAvailable,
     QueueFull,
+    InvalidUserContext,
+    NotPrepared,
+    ProcessNotAlive,
+    ProcessAddressSpaceMismatch,
+    InvalidTask,
 }
 
 #[derive(Clone, Copy)]
 struct TaskSlot {
     generation: u64,
     state: TaskState,
+    kind: TaskKind,
     saved_rsp: u64,
     queued: bool,
 }
@@ -60,6 +75,7 @@ impl TaskSlot {
     const EMPTY: Self = Self {
         generation: 0,
         state: TaskState::Vacant,
+        kind: TaskKind::Kernel,
         saved_rsp: 0,
         queued: false,
     };
@@ -276,11 +292,210 @@ pub fn spawn_kernel_task(entry: KernelTaskEntry) -> Result<TaskId, SpawnError> {
         scheduler.slots[index] = TaskSlot {
             generation,
             state: TaskState::Ready,
+            kind: TaskKind::Kernel,
             saved_rsp: context_addr,
             queued: true,
         };
         Ok(id)
     })
+}
+
+/// Reserves and initializes a user task context without making it runnable.
+/// The caller must have already built the process AddressSpace and user stack;
+/// `entry` and `user_rsp` are checked scalar values from that validated image.
+pub(crate) fn prepare_user_task(
+    process_id: ProcessId,
+    context: ValidatedUserContext,
+) -> Result<TaskId, SpawnError> {
+    let root = process::address_space_root(process_id)
+        .map_err(|_| SpawnError::ProcessAddressSpaceMismatch)?;
+    if context.root_frame() != root {
+        return Err(SpawnError::ProcessAddressSpaceMismatch);
+    }
+    let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
+    interrupts::without_interrupts(|| {
+        let mut scheduler = scheduler.lock();
+        if !scheduler.initialized {
+            return Err(SpawnError::SchedulerNotInitialized);
+        }
+        let index = reserve_slot(&mut scheduler)?;
+        let generation = scheduler.slots[index]
+            .generation
+            .checked_add(1)
+            .ok_or(SpawnError::TaskTableFull)?;
+        let id = TaskId {
+            slot: index as u8,
+            generation,
+        };
+        let (_, top) = arch_task::stack_bounds(index).ok_or(SpawnError::NoTaskStackAvailable)?;
+        let context_size = u64::try_from(core::mem::size_of::<arch_task::Context>())
+            .map_err(|_| SpawnError::NoTaskStackAvailable)?;
+        let context_addr = top
+            .checked_sub(context_size)
+            .ok_or(SpawnError::NoTaskStackAvailable)?;
+        if context_addr % 16 != 0 {
+            return Err(SpawnError::NoTaskStackAvailable);
+        }
+        let context = arch_task::Context {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rdi: 0,
+            rsi: 0,
+            rbp: 0,
+            rdx: 0,
+            rcx: 0,
+            rbx: 0,
+            rax: 0,
+            rip: context.entry(),
+            cs: u64::from(gdt::user_code_selector().0),
+            rflags: 0x202,
+            rsp: context.user_rsp(),
+            ss: u64::from(gdt::user_data_selector().0),
+        };
+        let (stack_low, _) =
+            arch_task::stack_bounds(index).ok_or(SpawnError::NoTaskStackAvailable)?;
+        // SAFETY: scheduler lock and IF masking prove this slot is not active;
+        // its pages were verified supervisor RW/NX during task initialization.
+        unsafe {
+            core::ptr::write_bytes(stack_low as *mut u8, 0, arch_task::STACK_SIZE as usize);
+            (context_addr as *mut arch_task::Context).write(context);
+        }
+        scheduler.slots[index] = TaskSlot {
+            generation,
+            state: TaskState::Prepared,
+            kind: TaskKind::User(process_id),
+            saved_rsp: context_addr,
+            queued: false,
+        };
+        Ok(id)
+    })
+}
+
+/// Atomically publishes the prepared process/task pair. Lock order is
+/// scheduler then process table; IF remains clear through Process Alive and
+/// ready-queue publication, so neither timer scheduling nor another kernel
+/// observer can see an intermediate state on this single CPU.
+pub(crate) fn publish_prepared_user_task(id: TaskId) -> Result<(), SpawnError> {
+    let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
+    interrupts::without_interrupts(|| {
+        let mut scheduler = scheduler.lock();
+        let slot = scheduler
+            .slots
+            .get(id.slot())
+            .ok_or(SpawnError::InvalidTask)?;
+        if slot.generation != id.generation || slot.state != TaskState::Prepared || slot.queued {
+            return Err(SpawnError::NotPrepared);
+        }
+        let TaskKind::User(process_id) = slot.kind else {
+            return Err(SpawnError::NotPrepared);
+        };
+        if scheduler.queue.len == MAX_KERNEL_TASKS {
+            return Err(SpawnError::QueueFull);
+        }
+        process::publish_created(process_id, id).map_err(|_| SpawnError::ProcessNotAlive)?;
+        scheduler
+            .queue
+            .push(id)
+            .expect("ready queue changed under scheduler lock");
+        let slot = &mut scheduler.slots[id.slot()];
+        slot.state = TaskState::Ready;
+        slot.queued = true;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "qemu-test")]
+pub fn run_prepared_user_task_test() {
+    let process_id = process::reserve(None, "prepared-test", pit::ticks())
+        .expect("failed to reserve prepared-task test process");
+    let (address_space, context) =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut address_space = kernel
+                .create_address_space()
+                .expect("failed to create prepared-task test root");
+            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                .expect("failed to create prepared-task test stack");
+            let page = x86_64::structures::paging::Page::from_start_address(x86_64::VirtAddr::new(
+                crate::arch::x86_64::memory::USER_MIN,
+            ))
+            .expect("USER_MIN is not page aligned");
+            address_space
+                .map_new_user_page(
+                    kernel,
+                    page,
+                    crate::arch::x86_64::memory::Permissions::USER_CODE,
+                )
+                .expect("failed to map prepared-task entry page");
+            let context = address_space
+                .validate_user_context(
+                    kernel,
+                    crate::arch::x86_64::memory::USER_MIN,
+                    crate::arch::x86_64::memory::USER_STACK_TOP,
+                )
+                .expect("test entry/stack pair did not validate");
+            (address_space, context)
+        });
+    process::install_address_space(process_id, address_space)
+        .expect("failed to attach Creating process AddressSpace");
+    let id = prepare_user_task(process_id, context).expect("failed to prepare user task");
+    process::install_primary_task(process_id, id).expect("failed to attach prepared primary task");
+    assert_eq!(task_state(id), Some(TaskState::Prepared));
+    assert_eq!(task_kind(id), Some(TaskKind::User(process_id)));
+    assert_eq!(task_state(id), Some(TaskState::Prepared));
+    assert!(!process::is_alive(process_id));
+    let snapshot = process::snapshot(process_id).expect("Creating process snapshot missing");
+    assert_eq!(snapshot.state, process::ProcessState::Creating);
+    assert_eq!(snapshot.mapped_user_pages, 9);
+    cancel_prepared_task(id).expect("could not cancel prepared test task");
+    process::abort_creation(process_id).expect("could not roll back test process reservation");
+    assert_eq!(task_state(id), None);
+    kprintln!("[scheduler-test] prepared user task remains non-runnable until process Alive");
+}
+
+pub fn cancel_prepared_task(id: TaskId) -> Result<(), SpawnError> {
+    let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
+    interrupts::without_interrupts(|| {
+        let mut scheduler = scheduler.lock();
+        let slot = scheduler
+            .slots
+            .get_mut(id.slot())
+            .ok_or(SpawnError::InvalidTask)?;
+        if slot.generation != id.generation || slot.state != TaskState::Prepared || slot.queued {
+            return Err(SpawnError::NotPrepared);
+        }
+        slot.state = TaskState::Vacant;
+        slot.saved_rsp = 0;
+        slot.kind = TaskKind::Kernel;
+        Ok(())
+    })
+}
+
+pub fn task_kind(id: TaskId) -> Option<TaskKind> {
+    let scheduler = SCHEDULER.get()?;
+    interrupts::without_interrupts(|| {
+        let scheduler = scheduler.lock();
+        let slot = scheduler.slots.get(id.slot())?;
+        (slot.generation == id.generation && slot.state != TaskState::Vacant).then_some(slot.kind)
+    })
+}
+
+fn reserve_slot(scheduler: &mut Scheduler) -> Result<usize, SpawnError> {
+    for (index, slot) in scheduler.slots.iter_mut().enumerate() {
+        if !matches!(slot.state, TaskState::Vacant | TaskState::Exited) {
+            continue;
+        }
+        if slot.generation.checked_add(1).is_some() {
+            return Ok(index);
+        }
+        slot.state = TaskState::Retired;
+    }
+    Err(SpawnError::TaskTableFull)
 }
 
 pub fn task_state(id: TaskId) -> Option<TaskState> {
@@ -359,6 +574,11 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
             );
             assert_eq!(slot.state, TaskState::Ready, "queued task is not Ready");
             assert!(slot.queued, "queued task missing queued flag");
+            assert_eq!(
+                slot.kind,
+                TaskKind::Kernel,
+                "user Task selected before CR3-aware scheduling is implemented"
+            );
             slot.queued = false;
             slot.state = TaskState::Running;
             let saved_rsp = slot.saved_rsp;

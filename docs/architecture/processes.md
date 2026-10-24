@@ -4,8 +4,9 @@
 stable-baseline sections describe pvKernel 0.0.8 at
 `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
-RSP0 support, and Phase D checked static ELF loading are implemented on the
-0.0.9 branch; userspace scheduling and CR3 activation are not yet present.
+RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
+user-task/process-resource model are implemented on the 0.0.9 branch.
+Userspace scheduling and CR3 activation are not yet present.
 
 ## 1. Scope and goals
 
@@ -258,6 +259,15 @@ observable Alive Process lacks a task that can be made runnable. Process
 publication itself is an infallible state write after validation; if that
 assumption changes, add rollback while locks and interrupt masking still
 prevent observation.
+
+Implementation note: each process slot now owns an optional `AddressSpace`
+and primary `TaskId` while Creating. Scheduler slots distinguish Kernel and
+User(ProcessId) tasks and include a non-queued `Prepared` state. Synthetic
+user contexts are initialized with user selectors, checked entry/RSP bounds,
+safe RFLAGS, and zero GPRs. QEMU verifies a Prepared task remains non-runnable
+while its process is Creating, and that cancellation plus Creating rollback
+leaves no schedulable task. Final publication will be exercised together
+with CR3-aware scheduling in later phases.
 
 ## 13. Lifecycle, Zombie and reap
 

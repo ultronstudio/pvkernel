@@ -55,6 +55,7 @@ pub enum AddressSpaceError {
     Mapping(MemoryError),
     AccountingOverflow,
     InvalidCopyRange,
+    InvalidUserContext,
 }
 
 impl From<MemoryError> for AddressSpaceError {
@@ -72,6 +73,27 @@ pub struct AddressSpace {
     mapped_user_pages: u64,
 }
 
+/// User entry/stack pair checked against one specific inactive root. Fields
+/// remain private so callers cannot fabricate a context from raw addresses.
+#[derive(Clone, Copy)]
+pub struct ValidatedUserContext {
+    root: PhysFrame<Size4KiB>,
+    entry: u64,
+    user_rsp: u64,
+}
+
+impl ValidatedUserContext {
+    pub const fn entry(self) -> u64 {
+        self.entry
+    }
+    pub const fn user_rsp(self) -> u64 {
+        self.user_rsp
+    }
+    pub(crate) const fn root_frame(self) -> PhysFrame<Size4KiB> {
+        self.root
+    }
+}
+
 impl AddressSpace {
     pub const fn mapped_user_pages(&self) -> u64 {
         self.mapped_user_pages
@@ -79,6 +101,46 @@ impl AddressSpace {
 
     pub(crate) fn root_frame(&self) -> PhysFrame<Size4KiB> {
         self.root
+    }
+
+    pub fn validate_user_context(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        entry: u64,
+        user_rsp: u64,
+    ) -> Result<ValidatedUserContext, AddressSpaceError> {
+        if entry < super::USER_MIN
+            || entry >= super::USER_MAX
+            || user_rsp <= super::USER_MIN
+            || user_rsp > super::USER_MAX
+            || user_rsp % 16 != 0
+            || VirtAddr::try_new(entry).is_err()
+            || VirtAddr::try_new(user_rsp).is_err()
+        {
+            return Err(AddressSpaceError::InvalidUserContext);
+        }
+        match self.translate(kernel, VirtAddr::new(entry))? {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && !flags.contains(PageTableFlags::WRITABLE)
+                    && !flags.contains(PageTableFlags::NO_EXECUTE) => {}
+            _ => return Err(AddressSpaceError::InvalidUserContext),
+        }
+        let stack_byte = user_rsp
+            .checked_sub(1)
+            .ok_or(AddressSpaceError::InvalidUserContext)?;
+        match self.translate(kernel, VirtAddr::new(stack_byte))? {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && flags.contains(PageTableFlags::WRITABLE)
+                    && flags.contains(PageTableFlags::NO_EXECUTE) => {}
+            _ => return Err(AddressSpaceError::InvalidUserContext),
+        }
+        Ok(ValidatedUserContext {
+            root: self.root,
+            entry,
+            user_rsp,
+        })
     }
 
     pub fn map_new_user_page(

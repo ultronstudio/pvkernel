@@ -7,7 +7,7 @@ pub mod elf;
 
 use spin::{Mutex, Once};
 
-use crate::kprintln;
+use crate::{arch::x86_64::memory::AddressSpace, kprintln, task::TaskId};
 
 pub const MAX_PROCESSES: usize = 8;
 pub const PROCESS_NAME_CAPACITY: usize = 32;
@@ -114,7 +114,6 @@ pub struct ProcessSnapshot {
     pub exit_reason: Option<ProcessExitReason>,
 }
 
-#[derive(Clone, Copy)]
 struct ProcessSlot {
     generation: u64,
     state: ProcessState,
@@ -127,6 +126,8 @@ struct ProcessSlot {
     mapped_user_pages: u64,
     task_count: u8,
     exit_reason: Option<ProcessExitReason>,
+    address_space: Option<AddressSpace>,
+    primary_task: Option<TaskId>,
 }
 
 impl ProcessSlot {
@@ -142,6 +143,8 @@ impl ProcessSlot {
         mapped_user_pages: 0,
         task_count: 0,
         exit_reason: None,
+        address_space: None,
+        primary_task: None,
     };
 
     fn clear_to_vacant(&mut self) {
@@ -155,6 +158,8 @@ impl ProcessSlot {
         self.mapped_user_pages = 0;
         self.task_count = 0;
         self.exit_reason = None;
+        self.address_space = None;
+        self.primary_task = None;
     }
 
     fn snapshot(&self, id: ProcessId) -> ProcessSnapshot {
@@ -182,7 +187,7 @@ struct ProcessTable {
 impl ProcessTable {
     const fn new() -> Self {
         Self {
-            slots: [ProcessSlot::EMPTY; MAX_PROCESSES],
+            slots: [const { ProcessSlot::EMPTY }; MAX_PROCESSES],
             next_pid: Some(1),
         }
     }
@@ -302,6 +307,71 @@ impl ProcessTable {
         Ok(())
     }
 
+    fn abort_creation(&mut self, id: ProcessId) -> Result<(), ProcessError> {
+        let slot = self.slot_for_mut(id)?;
+        if slot.state != ProcessState::Creating {
+            return Err(ProcessError::InvalidTransition);
+        }
+        // The PID and generation remain consumed. Vacant immediately makes
+        // this Creating identity stale; reuse advances generation later.
+        slot.clear_to_vacant();
+        Ok(())
+    }
+
+    fn install_address_space(
+        &mut self,
+        id: ProcessId,
+        address_space: AddressSpace,
+    ) -> Result<(), ProcessError> {
+        let slot = self.slot_for_mut(id)?;
+        if slot.state != ProcessState::Creating || slot.address_space.is_some() {
+            return Err(ProcessError::InvalidTransition);
+        }
+        slot.mapped_user_pages = address_space.mapped_user_pages();
+        slot.address_space = Some(address_space);
+        Ok(())
+    }
+
+    fn install_primary_task(&mut self, id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
+        let slot = self.slot_for_mut(id)?;
+        if slot.state != ProcessState::Creating
+            || slot.address_space.is_none()
+            || slot.primary_task.is_some()
+        {
+            return Err(ProcessError::InvalidTransition);
+        }
+        slot.primary_task = Some(task);
+        slot.task_count = 1;
+        Ok(())
+    }
+
+    fn publish_created(&mut self, id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
+        let slot = self.slot_for_mut(id)?;
+        if slot.state != ProcessState::Creating
+            || slot.address_space.is_none()
+            || slot.primary_task != Some(task)
+            || slot.task_count != 1
+        {
+            return Err(ProcessError::InvalidTransition);
+        }
+        slot.state = ProcessState::Alive;
+        Ok(())
+    }
+
+    fn address_space_root(
+        &self,
+        id: ProcessId,
+    ) -> Result<
+        x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>,
+        ProcessError,
+    > {
+        let slot = self.slot_for(id)?;
+        slot.address_space
+            .as_ref()
+            .map(AddressSpace::root_frame)
+            .ok_or(ProcessError::InvalidTransition)
+    }
+
     fn snapshot(&self, id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         let slot = self.slot_for(id)?;
         Ok(slot.snapshot(id))
@@ -345,8 +415,35 @@ pub fn reserve(
     with_table(|table| table.reserve(parent, name, created_tick))
 }
 
-pub fn publish_alive(id: ProcessId) -> Result<(), ProcessError> {
-    with_table(|table| table.transition(id, ProcessState::Creating, ProcessState::Alive))
+pub(crate) fn install_address_space(
+    id: ProcessId,
+    address_space: AddressSpace,
+) -> Result<(), ProcessError> {
+    with_table(|table| table.install_address_space(id, address_space))
+}
+
+pub(crate) fn install_primary_task(id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
+    with_table(|table| table.install_primary_task(id, task))
+}
+
+pub(crate) fn publish_created(id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
+    with_table(|table| table.publish_created(id, task))
+}
+
+pub fn is_alive(id: ProcessId) -> bool {
+    let Some(table) = PROCESS_TABLE.get() else {
+        return false;
+    };
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        table
+            .lock()
+            .slot_for(id)
+            .is_ok_and(|slot| slot.state == ProcessState::Alive)
+    })
+}
+
+pub fn abort_creation(id: ProcessId) -> Result<(), ProcessError> {
+    with_table(|table| table.abort_creation(id))
 }
 
 pub fn begin_exit(id: ProcessId, reason: ProcessExitReason, tick: u64) -> Result<(), ProcessError> {
@@ -366,6 +463,14 @@ pub fn snapshot(id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         .get()
         .expect("process subsystem used before init");
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().snapshot(id))
+}
+
+pub(crate) fn address_space_root(
+    id: ProcessId,
+) -> Result<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>, ProcessError>
+{
+    let table = PROCESS_TABLE.get().ok_or(ProcessError::InvalidId)?;
+    x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_root(id))
 }
 
 fn run_model_self_tests() {
