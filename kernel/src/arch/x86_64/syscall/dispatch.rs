@@ -67,6 +67,10 @@ pub(super) extern "C" fn pvkernel_syscall_dispatch(frame: *const SyscallFrame) -
         numbers::ABI_VERSION_QUERY => numbers::ABI_VERSION,
         numbers::DEBUG_WRITE_BYTE => debug_write_byte(arg0),
         numbers::TIMER_TICKS => crate::arch::x86_64::pit::ticks(),
+        numbers::GETPID => {
+            crate::task::current_user_pid().unwrap_or_else(|| SyscallError::InvalidContext.encode())
+        }
+        numbers::EXIT => crate::task::exit_current_user(frame.rdi as u32 as i32),
         #[cfg(feature = "userspace-test")]
         n if n >= numbers::TEST_NAMESPACE_BASE => super::test::dispatch(n, frame),
         _ => SyscallError::Unsupported.encode(),

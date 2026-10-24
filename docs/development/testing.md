@@ -89,6 +89,10 @@ timeout 60 cargo run --features scheduler-preemption-test -- --headless-test
 # counter; the only path between them is PIT-driven scheduler preemption.
 timeout 60 cargo run --features process-preemption-test -- --headless-test
 
+# Embedded ELF checks getpid and must not return after exit; the kernel
+# observes deferred Zombie publication and reaps the process.
+timeout 60 cargo run --features process-smoke-test -- --headless-test
+
 # Expected task stack lower-guard page fault.
 timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
 

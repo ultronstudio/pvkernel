@@ -387,6 +387,14 @@ impl ProcessTable {
             .ok_or(ProcessError::InvalidTransition)
     }
 
+    fn pid(&self, id: ProcessId) -> Result<Pid, ProcessError> {
+        let slot = self.slot_for(id)?;
+        if slot.state != ProcessState::Alive {
+            return Err(ProcessError::InvalidTransition);
+        }
+        slot.pid.ok_or(ProcessError::InvalidTransition)
+    }
+
     fn snapshot(&self, id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         let slot = self.slot_for(id)?;
         Ok(slot.snapshot(id))
@@ -478,6 +486,11 @@ pub fn snapshot(id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         .get()
         .expect("process subsystem used before init");
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().snapshot(id))
+}
+
+pub(crate) fn pid(id: ProcessId) -> Result<Pid, ProcessError> {
+    let table = PROCESS_TABLE.get().ok_or(ProcessError::InvalidId)?;
+    x86_64::instructions::interrupts::without_interrupts(|| table.lock().pid(id))
 }
 
 pub(crate) fn address_space_root(

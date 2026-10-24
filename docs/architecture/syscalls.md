@@ -1,18 +1,17 @@
 # Provisional bootstrap syscall ABI
 
-This document describes pvKernel 0.0.6's provisional, scalar-only `int 0x80`
+This document describes pvKernel's provisional, scalar-only `int 0x80`
 syscall ABI, implemented in
 [kernel/src/arch/x86_64/syscall/](../../kernel/src/arch/x86_64/syscall/). See
 [docs/architecture/userspace-entry.md](userspace-entry.md) for how CPL3 code
 capable of issuing this instruction gets there in the first place.
 
-## Status: provisional
+## Status: provisional and experimental in 0.0.9
 
 This ABI is **not stable** and not borrowed from `errno.h`/POSIX/Linux
-numbering. It exists to let 0.0.6's deterministic tests exercise a real
-CPL3 → CPL0 → CPL3 round trip and a minimal set of bootstrap operations; it
-is expected to be extended or replaced as pvKernel gains a process model
-(see [ROADMAP.md](../../ROADMAP.md)).
+numbering. It began as the 0.0.6 bootstrap boundary and is now extended with
+the first process-aware calls in 0.0.9. It remains experimental; the first
+meaningful compatibility checkpoint is 0.1.0 (see [ROADMAP.md](../../ROADMAP.md)).
 
 ## Entry mechanism: `int 0x80` only
 
@@ -65,6 +64,8 @@ Always compiled in (`syscall::numbers`):
 | 0 | `ABI_VERSION_QUERY` | Returns the current bootstrap ABI version (`1`). |
 | 1 | `DEBUG_WRITE_BYTE` | Logs the byte in `RDI` to serial output; returns `0`. |
 | 2 | `TIMER_TICKS` | Returns the current PIT tick counter (`pit::ticks()`). |
+| 3 | `GETPID` | Returns the current process PID; returns `InvalidContext` when no process-owned user Task is current. |
+| 4 | `EXIT` | Terminates the current process with `RDI as i32`; never returns to userspace. |
 
 Additionally, under the `userspace-test` Cargo feature, a small test-only
 namespace (`>= TEST_NAMESPACE_BASE`, `0x1000`) exists solely for the
@@ -104,20 +105,21 @@ privilege-level-changing interrupt.
 
 `syscall::dispatch::pvkernel_syscall_dispatch` first checks
 `frame.caller_privilege_level()` (derived from the saved `CS`'s RPL bits).
-Nothing in pvKernel 0.0.6 legitimately invokes `int 0x80` from CPL0; a CPL0
-origin is treated as a kernel bug, logged loudly, and reported through the
-normal error-return path (`SyscallError::InvalidContext`) rather than
-panicking — a stray kernel-mode `int 0x80` should not itself crash the
-kernel. Otherwise, it matches `frame.rax` against the documented syscall
-numbers above (and, under `userspace-test`, the test-only namespace),
-falling back to `SyscallError::Unsupported` for anything else.
+A CPL0 origin is treated as a kernel bug, logged loudly, and reported through
+the normal error-return path (`SyscallError::InvalidContext`) rather than
+panicking. For CPL3, `GETPID` checks that the scheduler has a current
+process-owned user Task. `EXIT` validates that same context, records Process
+and Task as Exiting, releases locks while IF is clear, then deliberately
+executes an STI;HLT terminal handoff so PIT can switch away. It never writes a
+result or returns to the saved user RIP. Zombie publication is deferred until
+a later timer entry runs on another stack. Other calls match the documented
+numbers above (and, under `userspace-test`, the test-only namespace), falling
+back to `SyscallError::Unsupported`.
 
 ## What this ABI does not provide
 
 * No `SYSCALL`/`SYSRET`.
-* No user-pointer arguments, and no `copy_from_user`/`copy_to_user`.
-* No per-process or per-thread state — there is no process model yet.
+* No user-pointer arguments yet; `copy_from_user`/`copy_to_user` are not implemented.
+* No stable ABI guarantee; the 0.0.9 process-aware extension remains experimental.
 * No signal delivery, no blocking syscalls, no I/O beyond the debug
   byte-logging syscall.
-* No stability guarantee: every number, encoding, and behavior described
-  here may change as pvKernel gains a real process model.

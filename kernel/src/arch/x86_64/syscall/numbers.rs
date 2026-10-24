@@ -38,6 +38,14 @@ pub const DEBUG_WRITE_BYTE: u64 = 1;
 /// Arguments: none. Returns: `arch::x86_64::pit::ticks()` in `RAX`.
 pub const TIMER_TICKS: u64 = 2;
 
+/// Returns the current process's human-visible PID, or `InvalidContext` for
+/// bootstrap/kernel execution without a process-owned user Task.
+pub const GETPID: u64 = 3;
+
+/// Terminates the current process with `RDI as i32`. This syscall never
+/// returns to its caller; process exit is completed after a timer handoff.
+pub const EXIT: u64 = 4;
+
 /// Start of the test-only syscall namespace.
 ///
 /// Numbers at or above this value are only ever dispatched when the

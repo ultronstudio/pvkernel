@@ -57,6 +57,7 @@ heap-guard-fault-test = ["kernel/heap-guard-fault-test"]
 scheduler-test = ["kernel/scheduler-test"]
 scheduler-preemption-test = ["kernel/scheduler-preemption-test"]
 process-preemption-test = ["kernel/process-preemption-test"]
+process-smoke-test = ["kernel/process-smoke-test"]
 task-stack-guard-fault-test = ["kernel/task-stack-guard-fault-test"]
 task-capacity-test = ["kernel/task-capacity-test"]
 

@@ -1,4 +1,4 @@
-#[cfg(feature = "process-preemption-test")]
+#[cfg(any(feature = "process-preemption-test", feature = "process-smoke-test"))]
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,8 +13,11 @@ use crate::{
         pit, task as arch_task,
     },
     kprintln,
-    process::{self, ProcessId},
+    process::{self, ProcessExitReason, ProcessId},
 };
+
+#[cfg(all(feature = "process-preemption-test", feature = "process-smoke-test"))]
+compile_error!("process-preemption-test and process-smoke-test are separate QEMU scenarios");
 
 pub const MAX_KERNEL_TASKS: usize = arch_task::MAX_KERNEL_TASKS;
 pub type KernelTaskEntry = fn();
@@ -134,6 +137,7 @@ struct Scheduler {
     queue: ReadyQueue,
     current: Option<TaskId>,
     bootstrap_rsp: u64,
+    pending_process_completion: Option<ProcessId>,
 }
 
 impl Scheduler {
@@ -144,6 +148,7 @@ impl Scheduler {
             queue: ReadyQueue::new(),
             current: None,
             bootstrap_rsp: 0,
+            pending_process_completion: None,
         }
     }
 }
@@ -157,6 +162,12 @@ static PROCESS_PREEMPTION_PROGRESS_A: AtomicU64 = AtomicU64::new(0);
 static PROCESS_PREEMPTION_PROGRESS_B: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "process-preemption-test")]
 static PROCESS_PREEMPTION_START_TICK: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "process-smoke-test")]
+static PROCESS_SMOKE_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "process-smoke-test")]
+static PROCESS_SMOKE_START_TICK: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "process-smoke-test")]
+static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
 static SMOKE_A: AtomicU64 = AtomicU64::new(0);
 static SMOKE_B: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A_SP: AtomicU64 = AtomicU64::new(0);
@@ -558,6 +569,14 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
         }
         None => {}
     }
+    #[cfg(feature = "process-smoke-test")]
+    if PROCESS_SMOKE_ACTIVE.load(Ordering::Acquire)
+        && pit::ticks().saturating_sub(PROCESS_SMOKE_START_TICK.load(Ordering::Relaxed)) >= 100
+    {
+        kprintln!("[process-test] process-smoke PIT watchdog expired");
+        pic::notify_end_of_interrupt(IrqLine::Timer);
+        crate::arch::x86_64::qemu::exit_failure();
+    }
     if from_user {
         let process_task_running = interrupts::without_interrupts(|| {
             let scheduler = scheduler.lock();
@@ -578,35 +597,67 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
             scheduler.initialized,
             "timer IRQ before scheduler initialization"
         );
+        if let Some(completed_process) = scheduler.pending_process_completion.take() {
+            // This IRQ is executing on a different context's kernel stack:
+            // assembly adopted it after the prior handoff. Zombie metadata
+            // can now be published without retaining the exiting stack.
+            process::mark_zombie(completed_process)
+                .expect("deferred process completion was not Exiting");
+        }
         match scheduler.current {
             Some(id) => {
-                let slot = scheduler
-                    .slots
-                    .get_mut(id.slot())
-                    .expect("current task index invalid");
-                assert_eq!(
-                    slot.generation, id.generation,
-                    "current task generation stale"
-                );
-                assert!(
-                    matches!(slot.state, TaskState::Running | TaskState::Exiting),
-                    "current task not Running/Exiting"
-                );
-                assert_eq!(
-                    matches!(slot.kind, TaskKind::User(_)),
-                    from_user,
-                    "saved privilege does not match current task kind"
-                );
-                assert!(!slot.queued, "Running task appeared in queue");
-                slot.saved_rsp = context as u64;
-                assert_task_stack_pointer(id.slot(), slot.saved_rsp);
-                if slot.state == TaskState::Exiting {
-                    slot.state = TaskState::Exited;
+                let exiting_process = {
+                    let slot = scheduler
+                        .slots
+                        .get_mut(id.slot())
+                        .expect("current task index invalid");
+                    assert_eq!(
+                        slot.generation, id.generation,
+                        "current task generation stale"
+                    );
+                    assert!(
+                        matches!(slot.state, TaskState::Running | TaskState::Exiting),
+                        "current task not Running/Exiting"
+                    );
+                    if slot.state == TaskState::Exiting {
+                        assert!(
+                            !from_user,
+                            "terminal user handoff unexpectedly returned to CPL3"
+                        );
+                    } else {
+                        assert_eq!(
+                            matches!(slot.kind, TaskKind::User(_)),
+                            from_user,
+                            "saved privilege does not match current task kind"
+                        );
+                    }
+                    assert!(!slot.queued, "Running task appeared in queue");
+                    slot.saved_rsp = context as u64;
+                    assert_task_stack_pointer(id.slot(), slot.saved_rsp);
+                    if slot.state == TaskState::Exiting {
+                        slot.state = TaskState::Exited;
+                        match slot.kind {
+                            TaskKind::User(process_id) => Some(process_id),
+                            TaskKind::Kernel => None,
+                        }
+                    } else {
+                        slot.state = TaskState::Ready;
+                        slot.queued = true;
+                        scheduler.queue.push(id).expect("runnable queue overflow");
+                        None
+                    }
+                };
+                if let Some(process_id) = exiting_process {
+                    assert!(
+                        scheduler.pending_process_completion.is_none(),
+                        "more than one process completion is pending"
+                    );
+                    scheduler.pending_process_completion = Some(process_id);
+                }
+                if exiting_process.is_some()
+                    || scheduler.slots[id.slot()].state == TaskState::Exited
+                {
                     scheduler.current = None;
-                } else {
-                    slot.state = TaskState::Ready;
-                    slot.queued = true;
-                    scheduler.queue.push(id).expect("runnable queue overflow");
                 }
             }
             None => scheduler.bootstrap_rsp = context as u64,
@@ -651,6 +702,71 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
     pic::notify_end_of_interrupt(IrqLine::Timer);
     apply_switch_plan(plan);
     plan.context_rsp as *mut arch_task::Context
+}
+
+/// Returns the current process PID for the process-aware scalar syscall ABI.
+/// Bootstrap CPL3 tests have no scheduler-owned user Task and therefore do
+/// not receive a fabricated PID.
+pub(crate) fn current_user_pid() -> Option<u64> {
+    let scheduler = SCHEDULER.get()?;
+    let process_id = interrupts::without_interrupts(|| {
+        let scheduler = scheduler.lock();
+        let id = scheduler.current?;
+        let slot = scheduler.slots.get(id.slot())?;
+        if slot.generation != id.generation || slot.state != TaskState::Running {
+            return None;
+        }
+        match slot.kind {
+            TaskKind::User(process_id) => Some(process_id),
+            TaskKind::Kernel => None,
+        }
+    })?;
+    process::pid(process_id).ok().map(|pid| pid.get())
+}
+
+/// Begins terminal process exit from the current user Task. The syscall gate
+/// has IF=0; process and scheduler state are made safe under the documented
+/// scheduler -> process lock order, then both locks are released before the
+/// explicit STI;HLT scheduler handoff. This function never returns to CPL3.
+pub(crate) fn exit_current_user(status: i32) -> ! {
+    let scheduler = SCHEDULER
+        .get()
+        .expect("process exit before scheduler initialization");
+    interrupts::without_interrupts(|| {
+        let mut scheduler = scheduler.lock();
+        let id = scheduler
+            .current
+            .expect("bootstrap context attempted process exit");
+        let slot = scheduler
+            .slots
+            .get_mut(id.slot())
+            .expect("current process Task slot is invalid");
+        assert_eq!(
+            slot.generation, id.generation,
+            "current task generation stale"
+        );
+        assert_eq!(
+            slot.state,
+            TaskState::Running,
+            "current task is not Running"
+        );
+        let TaskKind::User(process_id) = slot.kind else {
+            panic!("kernel Task attempted userspace exit syscall")
+        };
+        process::begin_exit(
+            process_id,
+            ProcessExitReason::Exited { status },
+            pit::ticks(),
+        )
+        .expect("current process could not transition to Exiting");
+        slot.state = TaskState::Exiting;
+    });
+    loop {
+        // SAFETY: all mutable syscall/process/scheduler work and locks have
+        // completed; this deliberately enables PIT so the scheduler can save
+        // this Exiting frame and adopt a different safe stack.
+        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)) };
+    }
 }
 
 /// Resolves the selected process root and performs architecture state changes
@@ -752,6 +868,74 @@ pub fn prepare_smoke_test() -> (TaskId, TaskId) {
     assert!(task_a.generation() > 0 && task_b.generation() > 0);
     kprintln!("[scheduler-test] task stacks verified");
     (task_a, task_b)
+}
+
+#[cfg(feature = "process-smoke-test")]
+pub fn prepare_process_smoke_test() {
+    let process_id = process::reserve(None, "process-smoke", pit::ticks())
+        .expect("failed to reserve process-smoke process");
+    let pid = process::snapshot(process_id)
+        .expect("Creating process has no metadata snapshot")
+        .pid
+        .get();
+    let image = process::elf::process_smoke_elf(pid);
+    let (address_space, context) =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut address_space = kernel
+                .create_address_space()
+                .expect("failed to create process-smoke AddressSpace");
+            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                .expect("failed to map process-smoke user stack");
+            let image = process::elf::load_static_elf(&mut address_space, kernel, &image)
+                .expect("embedded process-smoke ELF was rejected");
+            let context = address_space
+                .validate_user_context(
+                    kernel,
+                    image.entry,
+                    crate::arch::x86_64::memory::USER_STACK_TOP,
+                )
+                .expect("embedded process-smoke context was invalid");
+            (address_space, context)
+        });
+    process::install_address_space(process_id, address_space)
+        .expect("failed to attach process-smoke AddressSpace");
+    let task_id =
+        prepare_user_task(process_id, context).expect("failed to prepare process-smoke task");
+    process::install_primary_task(process_id, task_id)
+        .expect("failed to attach process-smoke task");
+    publish_prepared_user_task(task_id).expect("failed to publish process-smoke process");
+    PROCESS_SMOKE_ID.call_once(|| process_id);
+    PROCESS_SMOKE_START_TICK.store(pit::ticks(), Ordering::Relaxed);
+    PROCESS_SMOKE_ACTIVE.store(true, Ordering::Release);
+    kprintln!("[process-test] embedded ELF prepared for PID {pid}");
+}
+
+#[cfg(feature = "process-smoke-test")]
+pub fn wait_for_process_smoke_test() {
+    let process_id = *PROCESS_SMOKE_ID
+        .get()
+        .expect("process-smoke identity was not initialized");
+    while PROCESS_SMOKE_ACTIVE.load(Ordering::Acquire) {
+        if let Ok(snapshot) = process::snapshot(process_id) {
+            if snapshot.state == process::ProcessState::Zombie {
+                match snapshot.exit_reason {
+                    Some(ProcessExitReason::Exited { status: 0 }) => {
+                        kprintln!("[process-test] userspace getpid passed");
+                        kprintln!("[process-test] exit handoff reached Zombie safely");
+                        process::reap(process_id).expect("could not reap process-smoke Zombie");
+                        assert!(process::snapshot(process_id).is_err());
+                        PROCESS_SMOKE_ACTIVE.store(false, Ordering::Release);
+                        crate::arch::x86_64::qemu::exit_success();
+                    }
+                    reason => {
+                        kprintln!("[process-test] process-smoke exit failed: {reason:?}");
+                        crate::arch::x86_64::qemu::exit_failure();
+                    }
+                }
+            }
+        }
+        hlt();
+    }
 }
 
 pub fn run_smoke_test(task_a: TaskId, task_b: TaskId) {

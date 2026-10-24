@@ -628,6 +628,52 @@ fn test_elf() -> alloc::vec::Vec<u8> {
     bytes
 }
 
+/// Builds the embedded process-exit smoke ELF with its expected PID baked
+/// into the test code. This is a deterministic QEMU fixture, not a loader
+/// shortcut or a production executable provider.
+#[cfg(feature = "process-smoke-test")]
+pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
+    const ENTRY: u64 = 0x0040_0000;
+    const FILE_OFFSET: usize = 0x1000;
+    let mut code = [0u8; 50];
+    code[0..5].copy_from_slice(&[0xB8, 3, 0, 0, 0]); // mov eax, GETPID
+    code[5..7].copy_from_slice(&[0xCD, 0x80]);
+    code[7..9].copy_from_slice(&[0x48, 0xB9]); // mov rcx, expected PID
+    code[9..17].copy_from_slice(&expected_pid.to_le_bytes());
+    code[17..20].copy_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+    code[20..22].copy_from_slice(&[0x75, 0x0E]); // jne failure
+    code[22..27].copy_from_slice(&[0xBF, 0, 0, 0, 0]); // mov edi, 0
+    code[27..32].copy_from_slice(&[0xB8, 4, 0, 0, 0]); // mov eax, EXIT
+    code[32..34].copy_from_slice(&[0xCD, 0x80]);
+    code[34..36].copy_from_slice(&[0x0F, 0x0B]); // unreachable UD2 sentinel
+    code[36..41].copy_from_slice(&[0xBF, 1, 0, 0, 0]); // mov edi, 1
+    code[41..46].copy_from_slice(&[0xB8, 4, 0, 0, 0]);
+    code[46..48].copy_from_slice(&[0xCD, 0x80]);
+    code[48..50].copy_from_slice(&[0x0F, 0x0B]); // exit must never return
+
+    let mut bytes = alloc::vec![0; FILE_OFFSET + code.len()];
+    bytes[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
+    put_u16(&mut bytes, 16, 2);
+    put_u16(&mut bytes, 18, 62);
+    put_u32(&mut bytes, 20, 1);
+    put_u64(&mut bytes, 24, ENTRY);
+    put_u64(&mut bytes, 32, ELF_HEADER_SIZE as u64);
+    put_u16(&mut bytes, 52, ELF_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 54, PROGRAM_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 56, 1);
+    test_load_header(
+        &mut bytes,
+        64,
+        PF_R | PF_X,
+        FILE_OFFSET as u64,
+        ENTRY,
+        code.len() as u64,
+        code.len() as u64,
+    );
+    bytes[FILE_OFFSET..].copy_from_slice(&code);
+    bytes
+}
+
 #[cfg(feature = "qemu-test")]
 fn test_load_header(
     bytes: &mut [u8],
