@@ -192,7 +192,7 @@ static PROCESS_SMOKE_START_TICK: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "process-smoke-test")]
 static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
 #[cfg(feature = "user-fault-containment-test")]
-static USER_FAULT_IDS: Once<[ProcessId; 5]> = Once::new();
+static USER_FAULT_IDS: Once<[ProcessId; 6]> = Once::new();
 #[cfg(feature = "address-space-isolation-test")]
 static ADDRESS_ISOLATION_IDS: Once<[ProcessId; 2]> = Once::new();
 #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
@@ -1058,9 +1058,10 @@ pub fn prepare_user_fault_containment_test() {
         (14u8, Some(0xffff_8000_0000_0000), "fault-kernel-isolation"),
         (14u8, Some(stack_guard), "fault-user-stack-guard"),
         (13u8, None, "fault-gp"),
-        (6u8, None, "fault-ud"),
+        (6u8, None, "fault-simd-disabled"),
+        (7u8, None, "fault-x87-disabled"),
     ];
-    let mut ids = [None; 5];
+    let mut ids = [None; 6];
     for (index, (vector, fault_address, name)) in scenarios.into_iter().enumerate() {
         let process_id = process::reserve(None, name, pit::ticks())
             .expect("failed to reserve fault-containment process");
@@ -1120,6 +1121,7 @@ pub fn wait_for_user_fault_containment_test() {
             ),
             (13u8, None),
             (6u8, None),
+            (7u8, None),
         ];
         for (process_id, (expected_vector, expected_fault_address)) in ids.iter().zip(expected) {
             let snapshot = process::snapshot(*process_id)
@@ -1154,6 +1156,10 @@ pub fn wait_for_user_fault_containment_test() {
                                 assert_eq!(error_code, None);
                                 assert_eq!(fault_address, None);
                             }
+                            7 => {
+                                assert_eq!(error_code, None);
+                                assert_eq!(fault_address, None);
+                            }
                             _ => unreachable!(),
                         }
                         zombies += 1;
@@ -1167,7 +1173,7 @@ pub fn wait_for_user_fault_containment_test() {
                 process::reap(*process_id).expect("could not reap faulting Zombie");
                 assert!(process::snapshot(*process_id).is_err());
             }
-            kprintln!("[process-test] #PF/#GP/#UD containment, guards and isolation passed");
+            kprintln!("[process-test] #PF/#GP/#UD/#NM containment, guards and isolation passed");
             crate::arch::x86_64::qemu::exit_success();
         }
         if pit::ticks().saturating_sub(start_tick) >= 100 {

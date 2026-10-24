@@ -685,8 +685,9 @@ pub(crate) fn process_fault_elf_at(vector: u8, fault_address: u64) -> alloc::vec
     const ENTRY: u64 = 0x0040_0000;
     const FILE_OFFSET: usize = 0x1000;
     let code: &[u8] = match vector {
-        6 => &[0x0F, 0x0B],        // UD2
-        13 => &[0x0F, 0x20, 0xC0], // MOV RAX, CR0: privileged at CPL3
+        6 => &[0x66, 0x0F, 0xEF, 0xC0], // PXOR XMM0, XMM0: SIMD must be disabled
+        7 => &[0xD9, 0xE8],             // FLD1: x87 must be disabled
+        13 => &[0x0F, 0x20, 0xC0],      // MOV RAX, CR0: privileged at CPL3
         14 => return process_page_fault_elf(fault_address),
         _ => panic!("unsupported process fault fixture vector"),
     };
