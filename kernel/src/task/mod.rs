@@ -851,22 +851,21 @@ fn apply_switch_plan(plan: SwitchPlan) {
                 .expect("selected user task has no Alive process address space"),
         ),
     };
-    crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
-        match user_target {
-            Some(address_space) => kernel
-                .activate_handle(address_space)
-                .expect("selected process root failed the kernel mapping audit"),
-            None => kernel
-                .activate_kernel_root()
-                .expect("kernel root failed the mapping audit"),
-        }
-        if let Some(slot) = plan.task_slot.filter(|_| user_target.is_some()) {
-            let (_, top) = arch_task::stack_bounds(slot).expect("user task stack slot invalid");
-            gdt::set_current_rsp0(top).expect("selected user task has invalid kernel stack");
-        } else {
-            gdt::set_kernel_fallback_rsp0().expect("kernel fallback RSP0 is unavailable");
-        }
-    });
+    let root_switch =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| match user_target {
+            Some(address_space) => kernel.prepare_handle(address_space),
+            None => kernel.prepare_kernel_root_activation(),
+        })
+        .expect("selected root failed the kernel mapping audit");
+    root_switch
+        .activate()
+        .expect("verified address-space root activation failed");
+    if let Some(slot) = plan.task_slot.filter(|_| user_target.is_some()) {
+        let (_, top) = arch_task::stack_bounds(slot).expect("user task stack slot invalid");
+        gdt::set_current_rsp0(top).expect("selected user task has invalid kernel stack");
+    } else {
+        gdt::set_kernel_fallback_rsp0().expect("kernel fallback RSP0 is unavailable");
+    }
 }
 
 fn assert_task_stack_pointer(slot: usize, rsp: u64) {

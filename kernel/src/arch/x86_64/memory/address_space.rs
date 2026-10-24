@@ -80,6 +80,30 @@ pub struct AddressSpace {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressSpaceHandle(PhysFrame<Size4KiB>);
 
+/// A root whose required shared kernel mappings were checked while holding
+/// the kernel address-space lock. Activation is deliberately a separate
+/// operation so that no page-table lock is held across the CR3 load.
+pub(crate) struct VerifiedRootSwitch {
+    root: PhysFrame<Size4KiB>,
+    flags: Cr3Flags,
+}
+
+impl VerifiedRootSwitch {
+    /// Loads the root after the caller has left the kernel page-table lock.
+    /// Interrupts must remain disabled until the selected context is adopted.
+    pub(crate) fn activate(self) -> Result<(), AddressSpaceError> {
+        if x86_64::instructions::interrupts::are_enabled() {
+            return Err(AddressSpaceError::UnsafeKernelMapping);
+        }
+        // SAFETY: this token is only constructed after auditing that the
+        // target root contains the identical supervisor kernel mappings.
+        // Process roots are kernel-lifetime allocated and cannot be reclaimed
+        // during this IF-masked single-CPU handoff.
+        unsafe { Cr3::write(self.root, self.flags) };
+        Ok(())
+    }
+}
+
 /// User entry/stack pair checked against one specific inactive root. Fields
 /// remain private so callers cannot fabricate a context from raw addresses.
 #[derive(Clone, Copy)]
@@ -608,23 +632,22 @@ pub struct KernelAddressSpace {
 }
 
 impl KernelAddressSpace {
-    /// Loads a process root only after proving that its kernel-half PML4
-    /// entries exactly match the currently audited kernel root. This keeps
-    /// the active kernel stack, switch code, globals, GDT, IDT and TSS mapped
-    /// at identical supervisor-only VAs across the load.
-    pub fn activate_address_space(
+    /// Prepares a process-root switch only after proving that its kernel-half
+    /// PML4 entries exactly match the currently audited kernel root. The
+    /// returned token must be activated after this lock guard is released.
+    pub(crate) fn prepare_address_space_activation(
         &mut self,
         address_space: &AddressSpace,
-    ) -> Result<(), AddressSpaceError> {
-        self.activate_handle(address_space.handle())
+    ) -> Result<VerifiedRootSwitch, AddressSpaceError> {
+        self.prepare_handle(address_space.handle())
     }
 
     /// Loads a previously issued opaque process-root handle after validating
     /// that it is still represented by the audited shared kernel-half tree.
-    pub(crate) fn activate_handle(
+    pub(crate) fn prepare_handle(
         &mut self,
         address_space: AddressSpaceHandle,
-    ) -> Result<(), AddressSpaceError> {
+    ) -> Result<VerifiedRootSwitch, AddressSpaceError> {
         if x86_64::instructions::interrupts::are_enabled() {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
@@ -632,23 +655,24 @@ impl KernelAddressSpace {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
         self.verify_kernel_clone(address_space)?;
-        // SAFETY: the root is owned by AddressSpace, four-level paging was
-        // validated at boot, the exact supervisor kernel PML4 mappings were
-        // compared immediately above, and IF is clear through the call.
-        unsafe { Cr3::write(address_space.0, self.kernel_root_flags) };
-        Ok(())
+        Ok(VerifiedRootSwitch {
+            root: address_space.0,
+            flags: self.kernel_root_flags,
+        })
     }
 
     /// Restores the audited kernel root. Used on the return-to-kernel side of
     /// a switch plan and by root-switch validation tests.
-    pub fn activate_kernel_root(&mut self) -> Result<(), AddressSpaceError> {
+    pub(crate) fn prepare_kernel_root_activation(
+        &mut self,
+    ) -> Result<VerifiedRootSwitch, AddressSpaceError> {
         if x86_64::instructions::interrupts::are_enabled() {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
-        // SAFETY: kernel_root is the root captured from CR3 at validated
-        // initialization; its mapping tree is audited, and IF is clear.
-        unsafe { Cr3::write(self.kernel_root, self.kernel_root_flags) };
-        Ok(())
+        Ok(VerifiedRootSwitch {
+            root: self.kernel_root,
+            flags: self.kernel_root_flags,
+        })
     }
 
     fn verify_kernel_clone(
