@@ -127,9 +127,11 @@ as constants from current source.
 
 | Region | Current address/range | Notes |
 |---|---|---|
-| Kernel image, boot stack, boot info | Bootloader-selected dynamic mappings | Exact ranges not retained in kernel metadata |
-| Physical-memory map | BootInfo-provided dynamic base; maps usable physical memory | Required by OffsetPageTable; varies by boot |
-| Framebuffer | Bootloader-selected dynamic mapping | Dimensions retained; mapping range not tracked |
+| Kernel image | Bootloader dynamic arena; current QEMU base `0xffff800000000000` (PML4 256) | ELF `PT_LOAD` pages are audited from the loaded kernel ELF; `BootInfo.kernel_len` is the ELF backing length, not a contiguous virtual extent |
+| Bootloader kernel stack | Current QEMU `0xffff808000001000..0xffff808000015000` (PML4 257) | Guard page immediately below; runtime range is audited |
+| Framebuffer | Current QEMU `0xffff810000000000..0xffff8100003e8000` (PML4 258) | Retained by `kernel_main`; exact byte range is registered and audited |
+| Physical-memory map | Current QEMU `0xffff818000000000..0xffff828000000000` (PML4 259–260) | 1 TiB physical-address coverage in this QEMU memory map, including address holes/MMIO; not 1 TiB of RAM |
+| BootInfo + memory-region slice | Current QEMU `0xffff828000000000..0xffff828000000bb0` (PML4 261) | The allocator retains the memory-region slice; both ranges are audited |
 | Scratch | `0xffff_9000_0000_0000` | Test-only; checked unmapped before use |
 | Kernel heap | `0xffff_9000_1000_0000..0xffff_9000_1010_0000` | 1 MiB supervisor RW/NX; guard pages at `...0ffff000` and `...10100000` |
 | Kernel task stacks | `0xffff_9000_2000_0000..0xffff_9000_2003_0000` | 8 x 16 KiB RW/NX supervisor stacks; one unmapped page on each side; 24 KiB stride |
@@ -140,11 +142,15 @@ as constants from current source.
 | Other reservations | No global reservation registry | Collision checks are local to mapping callers |
 
 The explicit scratch, heap and task-stack ranges are all in PML4 index 288;
-the current test user pages are in lower-half PML4 index 192. The dynamic
-bootloader mappings' indices are not established by current code.
-
-No numeric address is claimed for dynamic bootloader mappings. A future
-mapping audit must record actual entries before a process root is activated.
+the current test user pages are in lower-half PML4 index 192. QEMU confirmed
+that the bootloader's default dynamic mapping previously placed the kernel at
+`0x0000_0100_0000_0000` (lower-half PML4 2). The implementation now configures
+the exact bootloader 0.11.17 dynamic allocator to use a dedicated upper-half
+arena, and runtime inspection confirms the required mappings in PML4 indices
+256–261. Bootloader identity mappings in lower-half PML4 entries remain in the
+kernel's initial root, but are not required after the kernel replaces the
+bootloader GDT and begins using the audited upper-half code, stacks, and
+physical-memory map; process roots do not copy them.
 
 ## 8. Proposed user virtual layout
 
@@ -152,7 +158,9 @@ Use only the lower canonical half (`USER_MIN=0x0000_0000_0001_0000`,
 exclusive `USER_MAX=0x0000_8000_0000_0000`). Keep addresses 0 through 64 KiB
 unmapped, including null and low aliases. USER_MAX is an exclusive bound,
 not dereferenceable. All arithmetic and rounding is checked. This layout is
-compatible with 48-bit canonical addressing and `LA57=0`.
+compatible with 48-bit canonical addressing and `LA57=0`. All retained
+bootloader mappings are now constrained to the upper half, so no lower-half
+PML4 slot is reserved for kernel mappings.
 
 | Region | Proposed layout |
 |---|---|
@@ -312,18 +320,33 @@ addresses. PIC/PIT are currently port-I/O devices and need no virtual mapping;
 future MMIO must be inventoried. All kernel leaves and parent entries must
 have USER clear.
 
-The proposed split uses lower PML4 indices 0..255 for user and upper indices
-256..511 for kernel. Do not blindly copy the upper half based on current
-code: kernel image, boot stack, framebuffer, boot info and physical map use
-dynamic bootloader placement, and pvKernel has no manifest proving all live
-dependencies are in the upper half. Before activating another root, inspect
-the active PML4 and recursively audit present entries (including huge pages),
-record actual required ranges, prove user ranges clear of bootloader-owned
-state, and verify effective USER permissions. If a required kernel mapping
-lies in the user half, relocate/rebuild it or fail boot clearly. If the
-audit proves all required mappings are upper-half, cloning entries 256..511
-is the compact kernel-global rule. Never silently omit a dependency or expose
-it to CPL3.
+The lower canonical half (PML4 0..255) is exclusively userspace; PML4
+256..511 is kernel-only. Bootloader 0.11.17's `dynamic_range_start` and
+`dynamic_range_end` are applied by its `UsedLevel4Entries` allocator at PML4
+granularity to every `Mapping::Dynamic` allocation, including an ET_DYN
+kernel image. pvKernel constrains that arena to
+`0xffff800000000000..0xffff900000000000` (PML4 256..287), immediately below
+its explicit index-288 mappings. The API treats the configured end as an
+address whose containing PML4 entry remains eligible; pvKernel passes the
+last page in index 287 (`0xffff8ffffffff000`) so index 288 onward is excluded.
+This arena has 32 PML4 entries / 16 TiB of virtual capacity. The QEMU boot
+uses six entries (kernel image, stack, framebuffer, two for the 1 TiB physical
+map, and BootInfo/memory map), leaving 26 entries / 13 TiB before index 288.
+Bootloader 0.11.17 panics with `no usable level 4 entries found` if a dynamic
+mapping cannot obtain enough contiguous entries; arena exhaustion is a boot
+failure, not a recoverable kernel allocation error.
+
+The default dynamic placement was observed to put the image in lower PML4 2.
+That placement is not retained as a 0.0.9 compatibility model: bootloader
+mapping policy moves all retained dynamic mappings into the dedicated upper
+arena. The kernel verifies actual BootInfo ranges and all loaded kernel
+`PT_LOAD` pages, checks the physical-map extent, confirms each required VA is
+canonical and upper-half, and recursively audits every present upper-half
+page-table entry (including huge pages) for USER clear. Process roots copy
+only audited upper-half PML4 entries. Lower-half bootloader identity mappings
+are not required by live kernel state and are deliberately omitted. Any
+required lower-half mapping or USER bit in the kernel half fails closed before
+a process root can be activated.
 
 New roots must remain reachable through the shared physical mapping. The
 current active-only mapper cannot do this; inactive-root construction and
@@ -646,11 +669,10 @@ These dependencies avoid assuming the difficult part is just loading ELF.
 No stable scheduler contradiction blocks this design. These are mandatory
 implementation gates:
 
-* Dynamic bootloader ranges are not recorded. Inspect actual PML4 mappings
-  and prove every live kernel dependency is preserved supervisor-only before
-  activating another root. If any needed mapping conflicts with user ranges,
-  relocation or explicit reconstruction is required; otherwise CR3 execution
-  is blocked.
+* Runtime mapping audit and upper-half bootloader arena configuration are
+  implemented. Re-run the audit on each boot and after any bootloader/config
+  change; failure to prove all required dependencies upper-half and supervisor
+  blocks CR3 activation.
 * Current paging API mutates only active root. Inactive root construction,
   physical access and frame ownership must be added before process creation.
 * Current Rust exception handlers are fatal/returning, not scheduler exits.
