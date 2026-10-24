@@ -37,7 +37,7 @@ use x86_64::{
     structures::paging::PageTableFlags,
 };
 
-pub(super) use address_space::KernelAddressSpace;
+pub use address_space::KernelAddressSpace;
 pub use address_space::{AddressSpace, AddressSpaceError, with_kernel_address_space};
 pub use paging::{Permissions, Translation};
 pub use user_stack::{USER_STACK_PAGES, USER_STACK_SIZE, USER_STACK_TOP, UserStack};

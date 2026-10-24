@@ -179,6 +179,52 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Copies bytes from one mapped user page through its supervisor-only
+    /// physical alias. The requested range must remain within that page.
+    pub fn read_user_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+        offset: usize,
+        output: &mut [u8],
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_address(page.start_address())?;
+        let end = offset
+            .checked_add(output.len())
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        if end > Size4KiB::SIZE as usize {
+            return Err(AddressSpaceError::InvalidCopyRange);
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
+        let virtual_address = page
+            .start_address()
+            .as_u64()
+            .checked_add(offset as u64)
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        let physical = match self.translate(kernel, VirtAddr::new(virtual_address))? {
+            Translation::Mapped { phys_addr, flags }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE) =>
+            {
+                phys_addr
+            }
+            _ => return Err(AddressSpaceError::UserPageNotMapped),
+        };
+        let source = kernel.physical_alias(physical)?;
+        // SAFETY: translation proved that the user mapping resolves to the
+        // checked page, physical_alias proved a supervisor-readable mapping,
+        // and output is a valid uniquely borrowed destination slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source.as_ptr::<u8>(),
+                output.as_mut_ptr(),
+                output.len(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn unmap_user_page(
         &mut self,
         kernel: &mut KernelAddressSpace,

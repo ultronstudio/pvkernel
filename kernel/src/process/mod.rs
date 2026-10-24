@@ -3,6 +3,8 @@
 //! Architecture-specific address-space and task resources are attached in
 //! later layers; this module owns only process policy and bounded metadata.
 
+pub mod elf;
+
 use spin::{Mutex, Once};
 
 use crate::kprintln;

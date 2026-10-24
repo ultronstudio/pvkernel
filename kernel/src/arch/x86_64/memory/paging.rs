@@ -81,6 +81,20 @@ impl Permissions {
         user_accessible: true,
     };
 
+    /// Read-only, non-executable userspace data.
+    pub const USER_READ_ONLY: Self = Self {
+        writable: false,
+        executable: false,
+        user_accessible: true,
+    };
+
+    /// Read-only executable userspace code.
+    pub const USER_EXECUTABLE: Self = Self {
+        writable: false,
+        executable: true,
+        user_accessible: true,
+    };
+
     fn to_flags(self) -> Result<PageTableFlags, MemoryError> {
         if self.writable && self.executable {
             return Err(MemoryError::InvalidPermissions);
