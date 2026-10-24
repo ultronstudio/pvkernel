@@ -192,7 +192,7 @@ static PROCESS_SMOKE_START_TICK: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "process-smoke-test")]
 static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
 #[cfg(feature = "user-fault-containment-test")]
-static USER_FAULT_IDS: Once<[ProcessId; 6]> = Once::new();
+static USER_FAULT_IDS: Once<[ProcessId; 7]> = Once::new();
 #[cfg(feature = "address-space-isolation-test")]
 static ADDRESS_ISOLATION_IDS: Once<[ProcessId; 2]> = Once::new();
 #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
@@ -1059,8 +1059,9 @@ pub fn prepare_user_fault_containment_test() {
         (13u8, None, "fault-gp"),
         (6u8, None, "fault-simd-disabled"),
         (7u8, None, "fault-x87-disabled"),
+        (8u8, None, "fault-avx-disabled"),
     ];
-    let mut ids = [None; 6];
+    let mut ids = [None; 7];
     for (index, (vector, fault_address, name)) in scenarios.into_iter().enumerate() {
         let process_id = process::reserve(None, name, pit::ticks())
             .expect("failed to reserve fault-containment process");
@@ -1121,6 +1122,7 @@ pub fn wait_for_user_fault_containment_test() {
             (13u8, None),
             (6u8, None),
             (7u8, None),
+            (6u8, None),
         ];
         for (process_id, (expected_vector, expected_fault_address)) in ids.iter().zip(expected) {
             let snapshot = process::snapshot(*process_id)
@@ -1172,7 +1174,9 @@ pub fn wait_for_user_fault_containment_test() {
                 process::reap(*process_id).expect("could not reap faulting Zombie");
                 assert!(process::snapshot(*process_id).is_err());
             }
-            kprintln!("[process-test] #PF/#GP/#UD/#NM containment, guards and isolation passed");
+            kprintln!(
+                "[process-test] #PF/#GP/#UD/#NM containment, guards, isolation and SIMD/AVX denial passed"
+            );
             crate::arch::x86_64::qemu::exit_success();
         }
         if pit::ticks().saturating_sub(start_tick) >= 100 {

@@ -137,8 +137,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::prepare_process_preemption_test();
     #[cfg(feature = "process-smoke-test")]
     task::prepare_process_smoke_test();
-    #[cfg(feature = "user-fault-containment-test")]
-    task::prepare_user_fault_containment_test();
     #[cfg(feature = "address-space-isolation-test")]
     task::prepare_address_space_isolation_test();
 
@@ -154,6 +152,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     pit::wait_for_ticks(TIMER_TEST_TICKS);
     task::run_smoke_test(scheduler_smoke_tasks.0, scheduler_smoke_tasks.1);
+    #[cfg(feature = "user-fault-containment-test")]
+    task::prepare_user_fault_containment_test();
     #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
     task::wait_for_release_userspace_smoke();
 

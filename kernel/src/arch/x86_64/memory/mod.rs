@@ -605,6 +605,21 @@ fn validate_paging_prerequisites() {
         );
     }
 
+    // CR0.EM blocks legacy SSE, but AVX uses XSAVE-managed YMM/ZMM state and
+    // is architecturally controlled by CR4.OSXSAVE plus XCR0. pvKernel does
+    // not own that state, so ensure AVX-family instructions #UD by clearing
+    // OSXSAVE rather than relying on firmware's XCR0 configuration.
+    let cr4 = Cr4::read();
+    if cr4.contains(Cr4Flags::OSXSAVE) {
+        // SAFETY: clearing OSXSAVE is valid in long mode and disables use of
+        // XSAVE-managed user state; no kernel path uses XSAVE/AVX.
+        unsafe { Cr4::write(cr4 & !Cr4Flags::OSXSAVE) };
+    }
+    assert!(
+        !Cr4::read().contains(Cr4Flags::OSXSAVE),
+        "pvKernel requires CR4.OSXSAVE clear until task FP state is saved"
+    );
+
     // This milestone does not save/restore x87, MMX, SSE, or AVX state on a
     // task switch. Set CR0.EM before any CPL3 context can run: Intel defines
     // MMX/SIMD execution as #UD with EM set, and x87 execution as #NM. The
