@@ -28,9 +28,9 @@ use halt::idle_loop;
 /// (`BootInfo::physical_memory_offset`), which `arch::x86_64::memory` needs
 /// to access the active page table (see [`arch::x86_64::memory::init`]).
 /// The bootloader picks the actual virtual range dynamically at boot time;
-/// pvKernel does not otherwise change the bootloader's default virtual
-/// memory layout (kernel, stack, framebuffer, and boot-info mappings all
-/// keep their default `Mapping::Dynamic` placement).
+/// pvKernel retains dynamic bootloader mappings but constrains their virtual
+/// placement to the audited upper-half kernel arena so the process lower
+/// canonical half remains user-only.
 const fn bootloader_config() -> BootloaderConfig {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
