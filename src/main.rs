@@ -29,7 +29,6 @@ fn main() -> ExitCode {
 
     let mut command = Command::new("qemu-system-x86_64");
     command
-        .env("GDK_BACKEND", "x11")
         .arg("-machine")
         .arg("q35")
         .arg("-m")
