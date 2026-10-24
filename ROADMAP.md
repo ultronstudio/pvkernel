@@ -89,7 +89,8 @@ out of scope for this milestone and remain future roadmap items.
 
 * stateful monotonic physical frame allocation
 * a fixed 1 MiB supervisor-only, writable, NX heap with unmapped guards
-* a first-fit free-list allocator with splitting, coalescing, and reuse
+* a first-fit bitmap allocator using 16-byte units, allocation-start metadata,
+  and reusable/coalescing adjacent free runs
 * Rust `alloc` support for `Box`, `Vec`, and `String`
 * deterministic heap, OOM, and guard-page QEMU tests
 
