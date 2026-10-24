@@ -1,12 +1,13 @@
 # pvKernel 0.0.9 process architecture
 
-**Status:** authoritative 0.0.9 design and current implementation model on
-the unmerged implementation branch; 0.0.9 is not released. The stable-
-baseline sections describe pvKernel 0.0.8 at
-`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
+**Status:** authoritative design and current implementation model for
+pvKernel 0.0.9, merged on `main` and passed through the formal pre-release
+audit with no P0, P1, or P2 blockers. Version 0.0.9 remains unreleased, and
+RC1 has not been created. The stable-baseline sections describe pvKernel 0.0.8
+at `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
-user-task/process-resource model are implemented on the 0.0.9 branch. Phase F
+user-task/process-resource model are implemented in 0.0.9. Phase F
 has an audited CR3 activation primitive, a Rust scheduler SwitchPlan, and a
 QEMU runtime root-switch/RSP0 smoke. Phase G now schedules process-owned CPL3
 timer frames and has a deterministic two-process preemption test; legacy
@@ -732,16 +733,14 @@ manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
 
 ## 34. Implementation status and remaining phases
 
-Implementation phases A through L are present on the 0.0.9 branch: bounded
+Implementation phases A through L are merged on `main`: bounded
 identity/lifecycle, audited inactive roots, stack/RSP0 support, checked ELF,
 prepared tasks/publication, CR3 switching, CPL3 PIT preemption, getpid/exit,
 checked user-copy, fault containment/Zombie reaping, accounting/QEMU scenarios,
-and version/docs updates. The remaining project gates are:
-
-* **M:** separate implementation PR and human review.
-* **N:** formal pre-release audit against the exact merged main and artifacts.
-* **O:** RC, published-artifact verification, then stable release only after
-  review. No RC or release is part of this implementation branch.
+and version/docs updates. The implementation review and formal pre-release
+audit are complete. The remaining project gate is RC creation and published-
+artifact verification, followed by stable release only after review. No RC or
+release has been created.
 
 The dependency order remains significant: runtime mapping audit precedes CR3
 activation, and the non-returning exception handoff precedes claims of user
