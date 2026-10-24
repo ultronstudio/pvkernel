@@ -38,7 +38,9 @@ from CPL0 — without this, a CPL3 `int 0x80` would itself raise `#GP`.
   the entry stub saves and restores all 15 GPRs around the dispatch.
 
 No syscall in this milestone accepts or dereferences a user pointer —
-every argument is treated as an opaque scalar integer.
+every argument is treated as an opaque scalar integer. Central
+`copy_from_user`/`copy_to_user` primitives exist for future pointer-taking
+syscalls, but current `getpid` and `exit` calls do not use them.
 
 ## Result encoding
 
@@ -119,7 +121,7 @@ back to `SyscallError::Unsupported`.
 ## What this ABI does not provide
 
 * No `SYSCALL`/`SYSRET`.
-* No user-pointer arguments yet; `copy_from_user`/`copy_to_user` are not implemented.
+* No user-pointer arguments yet; central user-copy primitives exist, but no current syscall accepts a pointer.
 * No stable ABI guarantee; the 0.0.9 process-aware extension remains experimental.
 * No signal delivery, no blocking syscalls, no I/O beyond the debug
   byte-logging syscall.
