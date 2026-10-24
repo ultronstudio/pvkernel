@@ -258,6 +258,13 @@ impl ProcessTable {
         expected: ProcessState,
         next: ProcessState,
     ) -> Result<(), ProcessError> {
+        if !matches!(
+            (expected, next),
+            (ProcessState::Creating, ProcessState::Alive)
+                | (ProcessState::Exiting, ProcessState::Zombie)
+        ) {
+            return Err(ProcessError::InvalidTransition);
+        }
         let slot = self.slot_for_mut(id)?;
         if slot.state != expected {
             return Err(ProcessError::InvalidTransition);
