@@ -99,26 +99,27 @@ freeing heap objects returns memory to the heap allocator, not the physical
 frame allocator. Dynamic heap growth and general physical-frame reclamation
 remain future work.
 
-## 0.0.8 — Kernel Tasks and Scheduler
+## 0.0.8 — Scheduler + Kernel Tasks
 
-* kernel-level tasks
-* context switching
-* a preemptive scheduler
+* bounded, single-core, ring-0 kernel tasks with dedicated guarded stacks
+* generation-aware task IDs and safe task lifecycle/slot reuse
+* complete x86_64 timer-interrupt context switching and deterministic
+  round-robin preemption
+* QEMU coverage for scheduler operation, true timer preemption, stack guards,
+  and capacity/reuse
 
-## 0.0.9 — ELF Userspace Loader and Init
+## 0.0.9 — Processes and Userspace Address Spaces
 
-* loading ELF userspace binaries
-* a minimal init process
-* a process model built on top of 0.0.6's ring-3/syscall foundation and
-  0.0.8's scheduler (superseding the standalone "Ring 3 and System Calls"
-  milestone originally planned here, since that foundation now exists
-  earlier)
-
+* process model and process lifecycle foundation
+* per-process address spaces and CR3 switching
+* userspace ELF execution foundation
+* builds on the existing provisional CPL3 entry/syscall boundary; does not
+  imply a stable userspace ABI
 
 ## 0.0.10 — VFS and Initial Ramdisk
 
-* a virtual filesystem layer
-* initial ramdisk support
+* VFS foundation
+* initrd and root filesystem foundation
 
 ## 0.1.0 — First pvOS-Ready Kernel Foundation
 
