@@ -65,6 +65,7 @@ heap-guard-fault-test = ["heap-test"]
 # exercises two tasks, while this feature gives it a dedicated QEMU job.
 scheduler-test = []
 scheduler-preemption-test = ["qemu-test"]
+process-preemption-test = ["qemu-test"]
 task-stack-guard-fault-test = ["qemu-test"]
 task-capacity-test = []
 

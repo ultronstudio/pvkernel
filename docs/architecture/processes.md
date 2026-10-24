@@ -7,8 +7,9 @@ Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
 user-task/process-resource model are implemented on the 0.0.9 branch. Phase F
 has an audited CR3 activation primitive, a Rust scheduler SwitchPlan, and a
-QEMU runtime root-switch/RSP0 smoke. CPL3 timer preemption is still disabled;
-the timer path currently returns user contexts unchanged.
+QEMU runtime root-switch/RSP0 smoke. Phase G now schedules process-owned CPL3
+timer frames and has a deterministic two-process preemption test; legacy
+direct-from-bootstrap CPL3 boundary tests retain their non-scheduling path.
 
 ## 1. Scope and goals
 
@@ -453,11 +454,19 @@ are released, it explicitly permits the PIT handoff as described below.
 | user A → user A | unchanged | restore A top |
 | user A → user B | A → B | set B top |
 
-The CPL3 timer early return must be removed only after a user's full context
-is saved on its own kernel stack and associated with a live task. The same
-Context should represent kernel and user timer returns. The syscall interrupt
-gate keeps the handler non-preemptible; pending PIT delivery occurs after
-iretq restores IF. Do not switch processes mid-syscall.
+Implementation note: `timer_schedule` now classifies the saved CS, requires it
+to match the current TaskKind, and schedules a CPL3 frame when that frame
+belongs to a process-owned Running user Task. The existing timer Context is
+saved on that task's RSP0 kernel stack; the selected process root and RSP0 are
+applied before assembly restores the selected frame. Direct CPL3 boundary
+tests that run from bootstrap with no current Task retain the legacy return-
+same-context behavior. The feature-gated `process-preemption-test` starts two
+non-yielding CPL3 loops and succeeds only after A and B each set an in-page
+flag after reading the peer's counter under PIT-driven task switching. It uses
+a PIT-tick watchdog and no host wall-clock criterion. The shared page mapping
+exists only in this QEMU test harness. Ordinary int 0x80 handlers remain non-preemptible;
+pending PIT delivery occurs after `iretq` restores IF. Do not switch processes
+mid-syscall.
 
 ## 20. Context representation
 
@@ -640,7 +649,7 @@ continued kernel activity are observed.
 | Scenario | Setup / purpose | Required success; failure |
 |---|---|---|
 | `process-smoke-test` | Embedded ELF enters CPL3, getpid, exit | deterministic entered/PID/exited markers; timeout/panic fails |
-| `process-preemption-test` | Two CPU-bound user tasks wait on each other's progress without yielding | both progress and finish before tick watchdog |
+| `process-preemption-test` | Two non-yielding CPL3 loops increment separate counters on a test-only shared page and set peer-observed flags | PIT handler passes only after both peer-observed flags are set; tick watchdog fails otherwise |
 | `address-space-isolation-test` | A/B map same VA to different frames with AA/BB and alternate repeatedly | each always sees own value over A→B→A; tests CR3/TLB/scheduler |
 | `user-stack-guard-fault-test` | User writes below mapped stack | process fault recorded, kernel continues |
 | `user-kernel-isolation-test` | CPL3 reads/writes supervisor mapping | controlled fault/denial; kernel data unchanged |

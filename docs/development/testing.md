@@ -85,6 +85,10 @@ timeout 60 cargo run --features "qemu-test scheduler-test" -- --headless-test
 # Two CPU-bound tasks that can finish only after IRQ-driven preemption.
 timeout 60 cargo run --features scheduler-preemption-test -- --headless-test
 
+# Two non-yielding CPL3 processes must each observe the peer's shared test
+# counter; the only path between them is PIT-driven scheduler preemption.
+timeout 60 cargo run --features process-preemption-test -- --headless-test
+
 # Expected task stack lower-guard page fault.
 timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
 

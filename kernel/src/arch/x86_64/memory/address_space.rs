@@ -189,6 +189,34 @@ impl AddressSpace {
         }
     }
 
+    /// Test-only shared user page mapping for the CPL3 preemption handshake.
+    /// This is not a production shared-memory API; it maps only the frame
+    /// allocated by the paired deterministic QEMU test.
+    #[cfg(feature = "process-preemption-test")]
+    pub(crate) fn map_test_shared_user_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+        frame: PhysFrame<Size4KiB>,
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_page(page, Permissions::USER_DATA)?;
+        if !matches!(
+            self.translate(kernel, page.start_address())?,
+            Translation::NotMapped
+        ) {
+            return Err(AddressSpaceError::UserPageAlreadyMapped);
+        }
+        let next_count = self
+            .mapped_user_pages
+            .checked_add(1)
+            .ok_or(AddressSpaceError::AccountingOverflow)?;
+        kernel.with_inactive_mapper(self, |mapper, allocator| {
+            paging::map_page(mapper, allocator, page, frame, Permissions::USER_DATA)
+        })?;
+        self.mapped_user_pages = next_count;
+        Ok(())
+    }
+
     pub fn update_user_permissions(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -328,6 +356,27 @@ impl AddressSpace {
             return Err(AddressSpaceError::Mapping(MemoryError::NonCanonicalAddress));
         }
         kernel.with_inactive_mapper(self, |mapper, _| Ok(paging::translate(mapper, address)))
+    }
+
+    /// Returns the supervisor physical-map alias for a mapped user page.
+    /// This narrow helper exists only for the deterministic preemption test,
+    /// whose trusted payload increments a private counter page.
+    #[cfg(feature = "process-preemption-test")]
+    pub(crate) fn test_user_page_kernel_alias(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+    ) -> Result<VirtAddr, AddressSpaceError> {
+        validate_user_address(page.start_address())?;
+        match self.translate(kernel, page.start_address())? {
+            Translation::Mapped { phys_addr, flags }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && flags.contains(PageTableFlags::WRITABLE) =>
+            {
+                kernel.physical_alias(phys_addr)
+            }
+            _ => Err(AddressSpaceError::UserPageNotMapped),
+        }
     }
 }
 
