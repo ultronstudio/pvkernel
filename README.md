@@ -55,8 +55,8 @@ Implemented:
 * stateful monotonic physical-frame allocation
 * a fixed 1 MiB supervisor-only, writable, NX kernel heap with unmapped
   guard pages
-* a global first-fit free-list allocator with splitting, coalescing, and
-  heap-object deallocation/reuse
+* a global first-fit bitmap allocator with alignment-aware reuse and
+  coalescing of adjacent free allocation units
 * Rust `alloc` support for `Box`, growing `Vec`, and `String`
 * deterministic heap success, OOM, and guard-page QEMU tests
 * structured serial diagnostics

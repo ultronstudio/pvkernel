@@ -182,8 +182,9 @@ operation.
 prerequisites and the active page table are validated. It verifies that
 every heap page and both adjacent guard pages were unmapped, creates
 supervisor-only writable NX mappings, verifies representative permissions,
-then initializes the `#[global_allocator]`. Its first-fit free list reuses
-and coalesces heap object storage. Backing physical frames remain owned by
+then initializes the `#[global_allocator]`. Its first-fit bitmap reuses heap
+object storage; adjacent free allocation units naturally combine into larger
+runs. Backing physical frames remain owned by
 the heap for the kernel lifetime and are not reclaimed by `Box`, `Vec`, or
 `String` deallocation. See
 [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)

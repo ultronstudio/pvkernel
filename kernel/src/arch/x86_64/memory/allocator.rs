@@ -1,86 +1,84 @@
-//! Fixed-range, first-fit kernel heap allocator.
+//! Fixed-range bitmap kernel heap allocator.
 //!
-//! Free nodes live inside free heap regions. Allocations carry no in-band
-//! metadata: `dealloc` receives the original `Layout`, whose size is rounded
-//! to the node alignment in exactly the same way as `alloc`.
+//! The heap is divided into 16-byte units. A static bitmap tracks occupied
+//! units and allocation starts, so allocator metadata never lives in the
+//! heap and allocator bookkeeping does not dereference raw pointers. First-fit
+//! search naturally reuses and coalesces adjacent free units.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::mem::{align_of, size_of};
-use core::ptr::{self, null_mut};
+use core::ptr::null_mut;
 use spin::Mutex;
 
 use crate::kprintln;
 
-const NODE_ALIGN: usize = align_of::<ListNode>();
-const NODE_SIZE: usize = size_of::<ListNode>();
-
-#[derive(Clone, Copy)]
-struct ListNode {
-    size: usize,
-    next: *mut ListNode,
-}
+const ALLOCATION_GRANULARITY: usize = 16;
+const MAX_HEAP_SIZE: usize = super::heap::HEAP_SIZE;
+const MAX_HEAP_UNITS: usize = MAX_HEAP_SIZE / ALLOCATION_GRANULARITY;
+const BITMAP_WORD_BITS: usize = usize::BITS as usize;
+const BITMAP_WORDS: usize = MAX_HEAP_UNITS.div_ceil(BITMAP_WORD_BITS);
 
 struct HeapAllocator {
     start: usize,
-    end: usize,
-    head: *mut ListNode,
+    units: usize,
+    occupied: [usize; BITMAP_WORDS],
+    allocation_starts: [usize; BITMAP_WORDS],
     initialized: bool,
 }
-
-// SAFETY: the allocator is only accessed through the enclosing spin mutex.
-unsafe impl Send for HeapAllocator {}
 
 impl HeapAllocator {
     const fn new() -> Self {
         Self {
             start: 0,
-            end: 0,
-            head: null_mut(),
+            units: 0,
+            occupied: [0; BITMAP_WORDS],
+            allocation_starts: [0; BITMAP_WORDS],
             initialized: false,
         }
     }
 
-    /// Checks a free-list node's address before any pointer dereference.
-    fn valid_node_address(&self, node: *const ListNode) -> bool {
-        if !self.initialized || node.is_null() {
-            return false;
-        }
-        let address = node as usize;
-        address >= self.start
-            && address.is_multiple_of(NODE_ALIGN)
-            && address
-                .checked_add(NODE_SIZE)
-                .is_some_and(|node_end| node_end <= self.end)
+    fn bit_is_set(bitmap: &[usize; BITMAP_WORDS], unit: usize) -> bool {
+        (bitmap[unit / BITMAP_WORD_BITS] & (1 << (unit % BITMAP_WORD_BITS))) != 0
     }
 
-    /// Initializes one free region without allocating metadata.
+    fn set_bit(bitmap: &mut [usize; BITMAP_WORDS], unit: usize) {
+        bitmap[unit / BITMAP_WORD_BITS] |= 1 << (unit % BITMAP_WORD_BITS);
+    }
+
+    fn clear_bit(bitmap: &mut [usize; BITMAP_WORDS], unit: usize) {
+        bitmap[unit / BITMAP_WORD_BITS] &= !(1 << (unit % BITMAP_WORD_BITS));
+    }
+
+    fn allocation_units(layout: Layout) -> Option<usize> {
+        layout
+            .size()
+            .max(1)
+            .checked_add(ALLOCATION_GRANULARITY - 1)
+            .map(|size| size / ALLOCATION_GRANULARITY)
+    }
+
+    /// Initializes the metadata for one exclusively owned heap range.
     ///
     /// # Safety
-    /// `start..start + size` must be a writable, mapped heap range that no
-    /// other owner can use, with `start` and `size` aligned to `NODE_ALIGN`.
+    /// The range must be writable, mapped, reserved for this allocator for
+    /// the kernel lifetime, and not accessible to any other allocator.
     unsafe fn init(&mut self, start: usize, size: usize) -> Result<(), &'static str> {
         if self.initialized {
             return Err("allocator initialized twice");
         }
         let end = start.checked_add(size).ok_or("heap range overflow")?;
-        if !start.is_multiple_of(NODE_ALIGN) || size < NODE_SIZE || !size.is_multiple_of(NODE_ALIGN)
+        if !start.is_multiple_of(ALLOCATION_GRANULARITY)
+            || !size.is_multiple_of(ALLOCATION_GRANULARITY)
+            || size > MAX_HEAP_SIZE
+            || size == 0
+            || end <= start
         {
             return Err("invalid heap range alignment or size");
         }
+
         self.start = start;
-        self.end = end;
-        // SAFETY: the caller guarantees this mapped range is writable and
-        // exclusively owned; `start` is aligned for `ListNode`.
-        unsafe {
-            ptr::write(
-                start as *mut ListNode,
-                ListNode {
-                    size,
-                    next: null_mut(),
-                },
-            )
-        };
-        self.head = start as *mut ListNode;
+        self.units = size / ALLOCATION_GRANULARITY;
+        self.occupied.fill(0);
+        self.allocation_starts.fill(0);
         self.initialized = true;
         Ok(())
     }
@@ -89,219 +87,109 @@ impl HeapAllocator {
         if !self.initialized {
             return null_mut();
         }
-        let Some(size) = layout.size().max(1).checked_add(NODE_ALIGN - 1) else {
+        let Some(requested_units) = Self::allocation_units(layout) else {
             return null_mut();
         };
-        let size = (size & !(NODE_ALIGN - 1)).max(NODE_SIZE);
-        let mut previous: *mut ListNode = null_mut();
-        let mut current = self.head;
+        if requested_units > self.units {
+            return null_mut();
+        }
 
-        while !current.is_null() {
-            if !self.valid_node_address(current) {
-                return null_mut();
-            }
-            // SAFETY: every list node is created only inside the heap from a
-            // free region; `valid_node_address` checks its alignment and
-            // complete metadata extent, and the lock protects list links.
-            let node = unsafe { &mut *current };
-            let block_start = current as usize;
-            let Some(aligned_start) = align_up(block_start, layout.align()) else {
-                previous = current;
-                current = node.next;
-                continue;
-            };
-            let prefix = aligned_start - block_start;
-            let Some(allocation_end) = aligned_start.checked_add(size) else {
-                previous = current;
-                current = node.next;
-                continue;
-            };
-            let Some(block_end) = block_start.checked_add(node.size) else {
+        let mut candidate = 0;
+        while candidate < self.units {
+            let Some(candidate_offset) = candidate.checked_mul(ALLOCATION_GRANULARITY) else {
                 return null_mut();
             };
-            if node.size < NODE_SIZE || block_end > self.end {
+            let Some(candidate_address) = self.start.checked_add(candidate_offset) else {
                 return null_mut();
-            }
-            if aligned_start < block_start
-                || allocation_end > block_end
-                || (prefix != 0 && prefix < NODE_SIZE)
-            {
-                previous = current;
-                current = node.next;
-                continue;
-            }
-            let suffix = block_end - allocation_end;
-            if suffix != 0 && suffix < NODE_SIZE {
-                previous = current;
-                current = node.next;
-                continue;
+            };
+            let Some(aligned_address) = align_up(candidate_address, layout.align()) else {
+                return null_mut();
+            };
+            let Some(aligned_offset) = aligned_address.checked_sub(self.start) else {
+                return null_mut();
+            };
+            let first_unit = aligned_offset / ALLOCATION_GRANULARITY;
+            let Some(end_unit) = first_unit.checked_add(requested_units) else {
+                return null_mut();
+            };
+            if end_unit > self.units {
+                return null_mut();
             }
 
-            let next = node.next;
-            if !next.is_null() && !self.valid_node_address(next) {
-                return null_mut();
-            }
-            let replacement = if suffix >= NODE_SIZE {
-                let suffix_node = allocation_end as *mut ListNode;
-                // SAFETY: the suffix is inside the original free node, has
-                // at least NODE_SIZE bytes, and starts NODE_ALIGN-aligned.
-                unsafe { ptr::write(suffix_node, ListNode { size: suffix, next }) };
-                suffix_node
-            } else {
-                next
-            };
-
-            if prefix >= NODE_SIZE {
-                // SAFETY: the existing node remains a valid free prefix.
-                unsafe {
-                    ptr::write(
-                        current,
-                        ListNode {
-                            size: prefix,
-                            next: replacement,
-                        },
-                    )
-                };
-            } else if previous.is_null() {
-                self.head = replacement;
-            } else {
-                // SAFETY: `previous` is a valid free-list node, as established
-                // by the traversal and rechecked here; the lock prevents
-                // concurrent edits.
-                if !self.valid_node_address(previous) {
-                    return null_mut();
+            let mut occupied_unit = None;
+            for unit in first_unit..end_unit {
+                if Self::bit_is_set(&self.occupied, unit) {
+                    occupied_unit = Some(unit);
+                    break;
                 }
-                unsafe { (*previous).next = replacement };
             }
-            return aligned_start as *mut u8;
+            if let Some(unit) = occupied_unit {
+                candidate = unit + 1;
+                continue;
+            }
+
+            for unit in first_unit..end_unit {
+                Self::set_bit(&mut self.occupied, unit);
+            }
+            Self::set_bit(&mut self.allocation_starts, first_unit);
+            return aligned_address as *mut u8;
         }
         null_mut()
     }
 
-    /// Reinserts a freed region in address order and coalesces neighbors.
-    /// Returns false for a pointer/range outside this heap or an overlap.
-    unsafe fn deallocate(&mut self, ptr: *mut u8, layout: Layout) -> bool {
+    /// Releases exactly one live allocation.
+    ///
+    /// The occupancy and start bitmaps validate the pointer and exact run
+    /// length before clearing anything, rejecting interior pointers, bad
+    /// layouts, and double frees without mutating allocator state.
+    fn deallocate(&mut self, ptr: *mut u8, layout: Layout) -> bool {
         if !self.initialized || ptr.is_null() {
             return false;
         }
-        let Some(rounded_size) = layout.size().max(1).checked_add(NODE_ALIGN - 1) else {
+        let Some(expected_units) = Self::allocation_units(layout) else {
             return false;
         };
-        let size = (rounded_size & !(NODE_ALIGN - 1)).max(NODE_SIZE);
-        let start = ptr as usize;
-        let Some(end) = start.checked_add(size) else {
+        let address = ptr as usize;
+        let Some(offset) = address.checked_sub(self.start) else {
             return false;
         };
-        if start < self.start
-            || end > self.end
-            || !start.is_multiple_of(NODE_ALIGN)
-            || size < NODE_SIZE
+        if !offset.is_multiple_of(ALLOCATION_GRANULARITY) || !address.is_multiple_of(layout.align())
+        {
+            return false;
+        }
+        let first_unit = offset / ALLOCATION_GRANULARITY;
+        if first_unit >= self.units
+            || !Self::bit_is_set(&self.occupied, first_unit)
+            || !Self::bit_is_set(&self.allocation_starts, first_unit)
         {
             return false;
         }
 
-        let mut previous: *mut ListNode = null_mut();
-        let mut next = self.head;
-        while !next.is_null() && (next as usize) < start {
-            if !self.valid_node_address(next) {
-                return false;
+        let mut actual_units = 0;
+        for unit in first_unit..self.units {
+            if !Self::bit_is_set(&self.occupied, unit)
+                || (unit != first_unit && Self::bit_is_set(&self.allocation_starts, unit))
+            {
+                break;
             }
-            previous = next;
-            // SAFETY: `valid_node_address` verifies `next` is aligned and its
-            // complete metadata region is inside this mapped heap.
-            next = unsafe { (*next).next };
+            actual_units += 1;
         }
-        if (!previous.is_null() && !self.valid_node_address(previous))
-            || (!next.is_null() && !self.valid_node_address(next))
-        {
+        if actual_units != expected_units {
             return false;
         }
 
-        let previous_end = if previous.is_null() {
-            self.start
-        } else {
-            // SAFETY: `previous` is a valid free-list node reached above.
-            let node = unsafe { &*previous };
-            let Some(end) = (previous as usize).checked_add(node.size) else {
-                return false;
-            };
-            end
-        };
-        if start < previous_end || (!next.is_null() && end > next as usize) {
-            return false;
+        for unit in first_unit..first_unit + actual_units {
+            Self::clear_bit(&mut self.occupied, unit);
         }
-
-        let mut merged_start = start;
-        let mut merged_size = size;
-        let mut successor = next;
-        if previous_end == start && !previous.is_null() {
-            // SAFETY: `previous` is the adjacent free region and metadata is
-            // valid under the list invariants.
-            merged_start = previous as usize;
-            let Some(coalesced_size) = (unsafe { (*previous).size }).checked_add(size) else {
-                return false;
-            };
-            merged_size = coalesced_size;
-            successor = unsafe { (*previous).next };
-        }
-        if !successor.is_null() && merged_start.checked_add(merged_size) == Some(successor as usize)
-        {
-            // SAFETY: `successor` is the adjacent next free region.
-            let successor_size = unsafe { (*successor).size };
-            let Some(successor_end) = (successor as usize).checked_add(successor_size) else {
-                return false;
-            };
-            if successor_end > self.end || successor_size < NODE_SIZE {
-                return false;
-            }
-            let Some(coalesced_size) = merged_size.checked_add(successor_size) else {
-                return false;
-            };
-            merged_size = coalesced_size;
-            successor = unsafe { (*successor).next };
-        }
-
-        let merged = merged_start as *mut ListNode;
-        let Some(merged_end) = merged_start.checked_add(merged_size) else {
-            return false;
-        };
-        if merged_start < self.start
-            || merged_end > self.end
-            || !merged_start.is_multiple_of(NODE_ALIGN)
-            || merged_size < NODE_SIZE
-        {
-            return false;
-        }
-        // SAFETY: the freed region and any coalesced adjacent free regions
-        // form a valid mapped, aligned region large enough for a node, as
-        // checked above.
-        unsafe {
-            ptr::write(
-                merged,
-                ListNode {
-                    size: merged_size,
-                    next: successor,
-                },
-            )
-        };
-        if previous.is_null() {
-            self.head = merged;
-        } else if merged != previous {
-            // SAFETY: `previous` was reached from the list and revalidated
-            // above before any list mutation.
-            if !self.valid_node_address(previous) {
-                return false;
-            }
-            unsafe { (*previous).next = merged };
-        }
+        Self::clear_bit(&mut self.allocation_starts, first_unit);
         true
     }
 }
 
-fn align_up(value: usize, align: usize) -> Option<usize> {
+fn align_up(value: usize, alignment: usize) -> Option<usize> {
     value
-        .checked_add(align.checked_sub(1)?)
-        .map(|v| v & !(align - 1))
+        .checked_add(alignment.checked_sub(1)?)
+        .map(|aligned| aligned & !(alignment - 1))
 }
 
 /// Global allocator used by `alloc`. Before heap initialization, allocation
@@ -339,10 +227,10 @@ unsafe impl GlobalAlloc for KernelGlobalAllocator {
         let valid = x86_64::instructions::interrupts::without_interrupts(|| {
             // SAFETY: GlobalAlloc's caller must pass a live allocation from
             // this allocator with its original layout.
-            unsafe { self.0.lock().deallocate(ptr, layout) }
+            self.0.lock().deallocate(ptr, layout)
         });
         if !valid {
-            kprintln!("[heap] invalid free or overlapping heap region");
+            kprintln!("[heap] invalid free, layout, or overlapping heap region");
             crate::halt::halt_forever();
         }
     }

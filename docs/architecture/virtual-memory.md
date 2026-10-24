@@ -357,19 +357,21 @@ active page table; map and verify the heap; initialize its global allocator;
 then proceed with PIC/PIT and later boot tests. Allocations before allocator
 initialization return null and flow to the deterministic OOM handler.
 
-The allocator is a repository-owned first-fit linked free list. Metadata is
-stored in free regions. Allocation aligns the returned address, splits
-usable prefix/suffix fragments, and skips fragments too small for metadata.
-Deallocation reinserts in address order, rejects overlaps, and coalesces
-adjacent regions. A spin mutex protects the list; each allocator critical
-section disables maskable interrupts to avoid same-CPU IRQ reentrancy and
+The allocator is a repository-owned first-fit bitmap. Its static occupancy
+bitmap tracks 16-byte heap units, and a second bitmap records allocation
+starts. It aligns requested addresses and marks the required units; freeing
+clears those bits, so adjacent free units are immediately reusable as a larger
+run. The static metadata avoids raw pointer dereferences and does not
+recursively allocate from the heap. A 1 MiB heap uses 16 KiB of bitmap state.
+A spin mutex protects the bitmaps; each allocator critical section disables
+maskable interrupts to avoid same-CPU IRQ reentrancy and
 deadlock. The kernel is still single-CPU, so SMP synchronization is not
 claimed. OOM reports size and alignment using allocation-free serial
 formatting and halts (or exits as failure in QEMU test mode).
 
 Physical backing frames allocated for heap pages transfer to the heap and
 remain owned by it for the kernel lifetime. `Box`, `Vec`, and `String`
-deallocation returns space to the heap free list; it does not return frames
+deallocation returns space to the heap allocator; it does not return frames
 to the monotonic physical frame allocator. Heap mapping failures after frame
 allocation are fatal and do not attempt unsafe rollback.
 

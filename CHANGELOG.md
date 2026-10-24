@@ -8,8 +8,8 @@
   cursor, removing repeated whole-map frame rescans.
 * A fixed 1 MiB supervisor-only, writable, NX kernel heap mapping with
   unmapped guard pages and runtime permission verification.
-* A first-fit in-kernel free-list global allocator with alignment-aware
-  allocation, splitting, deallocation, and adjacent-region coalescing.
+* A first-fit in-kernel bitmap global allocator with alignment-aware
+  allocation, reusable allocation runs, and adjacent-free-unit coalescing.
 * Rust `alloc` support for `Box`, growing `Vec`, and `String`, with
   allocation-free deterministic OOM reporting.
 * Deterministic heap success, OOM, and guard-page QEMU scenarios.
