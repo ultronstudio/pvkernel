@@ -106,6 +106,10 @@ jobs:
           - "qemu-test heap-test"
           - "qemu-test heap-oom-test"
           - "qemu-test heap-guard-fault-test"
+          - scheduler-test
+          - scheduler-preemption-test
+          - task-stack-guard-fault-test
+          - task-capacity-test
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,3 +271,55 @@ jobs:
           description: >-
             Reads the unmapped supervisor heap guard page and validates the
             expected non-present page fault.
+
+  qemu-scheduler:
+    name: QEMU / kernel scheduler smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test scheduler-test"
+          description: >-
+            Runs two kernel tasks on distinct guarded stacks, validates their
+            lifecycle, and confirms bootstrap idle resumes after task exit.
+
+  qemu-scheduler-preemption:
+    name: QEMU / timer-driven task preemption
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: scheduler-preemption-test
+          description: >-
+            Uses two CPU-bound tasks with no voluntary yields; each can finish
+            only after timer preemption has run the other task.
+
+  qemu-task-stack-guard:
+    name: QEMU / task stack guard page
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: task-stack-guard-fault-test
+          description: >-
+            Deliberately reads a kernel task's unmapped lower stack guard and
+            validates the CPL0 non-present read fault.
+
+  qemu-task-capacity:
+    name: QEMU / task capacity and reuse
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test task-capacity-test"
+          description: >-
+            Fills the fixed task table, checks deterministic exhaustion,
+            reuses an exited slot with a new generation, and rejects the old ID.
