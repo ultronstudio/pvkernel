@@ -6,9 +6,9 @@ stable-baseline sections describe pvKernel 0.0.8 at
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
 user-task/process-resource model are implemented on the 0.0.9 branch. Phase F
-has an audited CR3 activation primitive and a QEMU runtime root-switch smoke;
-the scheduler SwitchPlan and task-to-task address-space handoff are still
-pending. Userspace scheduling is not yet enabled.
+has an audited CR3 activation primitive, a Rust scheduler SwitchPlan, and a
+QEMU runtime root-switch/RSP0 smoke. CPL3 timer preemption is still disabled;
+the timer path currently returns user contexts unchanged.
 
 ## 1. Scope and goals
 
@@ -387,9 +387,14 @@ clone verification establish that invariant; failure to establish it blocks
 process scheduling.
 
 Implementation note: `KernelAddressSpace::activate_address_space` checks IF=0,
-re-audits live kernel mappings, compares every upper PML4 entry with the
-kernel root (ignoring only the hardware-managed Accessed bit), and only then
-loads the process CR3. The QEMU runtime smoke alternates two roots whose
+compares every upper PML4 entry with the kernel root (ignoring only the
+hardware-managed Accessed bit), and only then loads the process CR3. The full
+recursive boot/live mapping audit runs at boot and during root construction,
+not on the PIT hot path; scheduler-time verification is bounded to the 512
+top-level entries. The scheduler constructs a `SwitchPlan` under scheduler
+state protection, releases locks, acknowledges PIT, then applies the root and
+selected-task RSP0 before returning the context pointer to assembly. The QEMU
+runtime smoke alternates two roots whose
 `USER_MIN` pages contain `0xAA` and `0xBB`, reads through the active VA each
 time, then restores the kernel root. This proves root-load continuity and
 same-VA translation isolation; it does not yet prove scheduler handoff.

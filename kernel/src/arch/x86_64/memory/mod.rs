@@ -39,7 +39,8 @@ use x86_64::{
 
 pub use address_space::KernelAddressSpace;
 pub use address_space::{
-    AddressSpace, AddressSpaceError, ValidatedUserContext, with_kernel_address_space,
+    AddressSpace, AddressSpaceError, AddressSpaceHandle, ValidatedUserContext,
+    with_kernel_address_space,
 };
 pub use paging::{Permissions, Translation};
 pub use user_stack::{USER_STACK_PAGES, USER_STACK_SIZE, USER_STACK_TOP, UserStack};
@@ -356,10 +357,15 @@ pub fn run_address_space_switch_smoke_test() {
         b.write_user_page(kernel, page, 0, &[0xBB])
             .expect("failed to initialize CR3 test page B");
 
-        for (space, expected) in [(&a, 0xAA), (&b, 0xBB), (&a, 0xAA), (&b, 0xBB)] {
+        for (space, slot, expected) in [(&a, 0, 0xAA), (&b, 1, 0xBB), (&a, 0, 0xAA), (&b, 1, 0xBB)]
+        {
             kernel
                 .activate_address_space(space)
                 .expect("audited process CR3 activation failed");
+            let (_, kernel_stack_top) = crate::arch::x86_64::task::stack_bounds(slot)
+                .expect("user task kernel stack slot is unavailable");
+            crate::arch::x86_64::gdt::set_current_rsp0(kernel_stack_top)
+                .expect("user task RSP0 rejected its owned kernel stack");
             // SAFETY: the selected root maps USER_MIN to a zeroed frame
             // populated above; CPL0 may read a user page, the upper-half
             // mapping audit preserves this code and stack, and IF is clear.
@@ -369,6 +375,12 @@ pub fn run_address_space_switch_smoke_test() {
         kernel
             .activate_kernel_root()
             .expect("failed to restore kernel CR3 after smoke test");
+        crate::arch::x86_64::gdt::set_kernel_fallback_rsp0()
+            .expect("failed to restore bootstrap RSP0 after smoke test");
+        assert_eq!(
+            crate::arch::x86_64::gdt::current_rsp0().unwrap(),
+            crate::arch::x86_64::gdt::kernel_fallback_rsp0().as_u64()
+        );
     });
     kprintln!("[process-test] runtime CR3 switching and same-VA isolation passed");
 }

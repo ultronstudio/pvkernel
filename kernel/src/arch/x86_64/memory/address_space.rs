@@ -73,6 +73,13 @@ pub struct AddressSpace {
     mapped_user_pages: u64,
 }
 
+/// Opaque, copyable identity for a process root used only by the architecture
+/// switch boundary. It exposes neither a naked CR3 integer nor page-table
+/// mutation to generic scheduler code. The owning Process must stay Alive (or
+/// Exiting while its task is active) until another context has been adopted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddressSpaceHandle(PhysFrame<Size4KiB>);
+
 /// User entry/stack pair checked against one specific inactive root. Fields
 /// remain private so callers cannot fabricate a context from raw addresses.
 #[derive(Clone, Copy)]
@@ -101,6 +108,10 @@ impl AddressSpace {
 
     pub(crate) fn root_frame(&self) -> PhysFrame<Size4KiB> {
         self.root
+    }
+
+    pub(crate) const fn handle(&self) -> AddressSpaceHandle {
+        AddressSpaceHandle(self.root)
     }
 
     pub fn validate_user_context(
@@ -371,19 +382,26 @@ impl KernelAddressSpace {
         &mut self,
         address_space: &AddressSpace,
     ) -> Result<(), AddressSpaceError> {
+        self.activate_handle(address_space.handle())
+    }
+
+    /// Loads a previously issued opaque process-root handle after validating
+    /// that it is still represented by the audited shared kernel-half tree.
+    pub(crate) fn activate_handle(
+        &mut self,
+        address_space: AddressSpaceHandle,
+    ) -> Result<(), AddressSpaceError> {
         if x86_64::instructions::interrupts::are_enabled() {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
         if !self.boot_mapping_audited {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
-        self.verify_live_kernel_mappings()
-            .map_err(|_| AddressSpaceError::KernelMappingMissing)?;
         self.verify_kernel_clone(address_space)?;
         // SAFETY: the root is owned by AddressSpace, four-level paging was
         // validated at boot, the exact supervisor kernel PML4 mappings were
         // compared immediately above, and IF is clear through the call.
-        unsafe { Cr3::write(address_space.root, self.kernel_root_flags) };
+        unsafe { Cr3::write(address_space.0, self.kernel_root_flags) };
         Ok(())
     }
 
@@ -393,16 +411,17 @@ impl KernelAddressSpace {
         if x86_64::instructions::interrupts::are_enabled() {
             return Err(AddressSpaceError::UnsafeKernelMapping);
         }
-        self.verify_live_kernel_mappings()
-            .map_err(|_| AddressSpaceError::KernelMappingMissing)?;
         // SAFETY: kernel_root is the root captured from CR3 at validated
         // initialization; its mapping tree is audited, and IF is clear.
         unsafe { Cr3::write(self.kernel_root, self.kernel_root_flags) };
         Ok(())
     }
 
-    fn verify_kernel_clone(&self, address_space: &AddressSpace) -> Result<(), AddressSpaceError> {
-        let alias = self.physical_alias(address_space.root.start_address())?;
+    fn verify_kernel_clone(
+        &self,
+        address_space: AddressSpaceHandle,
+    ) -> Result<(), AddressSpaceError> {
+        let alias = self.physical_alias(address_space.0.start_address())?;
         // SAFETY: the root frame is privately owned by this AddressSpace,
         // mapped through the audited supervisor physical map, and read-only
         // for this verification while the kernel address-space lock is held.
