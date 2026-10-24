@@ -80,10 +80,14 @@ saved frame is within this stack. Current CPL3 syscalls, exceptions and
 timer entries therefore share that static stack. This cannot support
 multiple preemptible userspace tasks because their live frames can overlap.
 
-Add a narrow checked `set_current_rsp0(top)` operation later. Invoke it with
-IF clear after selecting a task and before any return to CPL3. RSP0 must be
-the selected task's dedicated supervisor kernel-stack top, never its user
-stack or another task's stack.
+The static 0.0.8 syscall stack is a kernel-lifetime safe fallback RSP0 while
+the current target is the bootstrap context or a kernel Task. Same-CPL0
+interrupt entry uses the current RSP, not RSP0. Add a narrow checked
+`set_current_rsp0(top)` operation later. Immediately before every `iretq`
+that returns to CPL3, RSP0 must contain the validated kernel-stack top of
+that exact userspace Task. Do not treat RSP0 as the current kernel task's
+stack pointer. When switching from a user Task to a kernel Task/bootstrap,
+restore the safe fallback before the outgoing user stack can become reusable.
 
 ## 6. Current paging, userspace and syscall facts
 
@@ -181,11 +185,16 @@ generic scheduler code.
 ## 10. ProcessId
 
 Use `ProcessId { slot: u8, generation: u64 }`, matching current TaskId widths
-and an 8-slot process table. First allocation advances generation zero to
-one. Lookup checks bounds, generation and state
-before access; invalid/stale IDs return typed errors or `None`. Increment
-generation with `checked_add`; retire an exhausted slot permanently. It is
-an internal handle, not a pointer, PID, or unchecked array index.
+and an 8-slot process table. Generation 0 is never issued. Advance the
+generation with `checked_add` when reserving a new identity from a reusable
+Vacant slot; the first reservation advances zero to one. If increment
+overflows, mark that slot Retired and try another. Lookup checks bounds,
+generation and state before access; invalid/stale IDs return typed errors
+or `None`; Vacant and Retired slots never identify a live process. Reaping
+Zombie to Vacant does not increment generation: Vacant already makes the old
+ID invalid. A later reservation increments it before issuing the next ID.
+Failed Creating attempts may consume a generation. This is an internal
+handle, not a pointer, PID or unchecked array index.
 
 ## 11. PID
 
@@ -204,19 +213,37 @@ ticks, CPU ticks, mapped user pages, task count and exit metadata. `Creating`
 is private and not schedulable. Capacity exhaustion returns
 `ProcessTableFull`, not panic.
 
-Do not hold process and scheduler locks over context switch. Prefer creating
-an unpublished process first, then publish it Alive and enqueue only when all
-resources/context are ready. Define one lock order or avoid nested locks.
+Do not hold process and scheduler locks over context switch. Define one lock
+order for the final transaction (scheduler then process table if scheduler
+selection resolves ProcessId while holding scheduler state). Prepare the
+primary task first: reserve its slot, stack and context in a non-runnable
+Reserved/Prepared state, but do not queue it or make it runnable. Keep the
+process Creating until its address space, ELF and user stack are complete.
+Then, with interrupts masked and both locks
+held, validate the pairing and queue capacity, enqueue the prepared task,
+mark the process Alive, and only then release the locks/restore IF. On this
+single CPU, timer scheduling cannot observe the intermediate state; the
+scheduler lock also prevents selection before Alive is published. The
+enqueue operation must be fallible without partial insertion. If task-slot
+reservation or queue-capacity validation fails, leave the process Creating
+and roll back the prepared task before returning an error. There must be no
+path where a runnable Task references a non-Alive Process, or an externally
+observable Alive Process lacks a task that can be made runnable. Process
+publication itself is an infallible state write after validation; if that
+assumption changes, add rollback while locks and interrupt masking still
+prevent observation.
 
 ## 13. Lifecycle, Zombie and reap
 
 Legal lifecycle: `Vacant -> Creating -> Alive -> Exiting -> Zombie -> reap
--> Vacant`, plus `Retired` on generation exhaustion. Failed creation returns
-Creating to Vacant (or Retired if exhausted) and is never schedulable. Alive
+-> Vacant`, plus `Retired` when a new reservation cannot advance generation.
+Generation advances at reservation, not at reap. Failed creation returns
+Creating to Vacant; its consumed generation is not rolled back. Alive
 means a valid AddressSpace and user task exist. Exiting cannot be selected
 for ordinary new work, though it may still execute on its kernel stack.
 Zombie has no executing task and retains exit data. Only Zombie may be
-reaped. Reaping invalidates old ProcessId through checked generation change.
+reaped. Reaping changes Zombie to Vacant, which immediately invalidates the
+old ProcessId; the next reservation advances generation.
 Creating, Exiting or Zombie must never be enqueued; Alive requires all
 address-space and task invariants.
 
@@ -249,9 +276,16 @@ only classifier. #UD has no error code, #GP has one, and #PF also records
 CR2. Existing Rust interrupt handlers return through the faulting frame or
 halt the kernel. They cannot safely mark a process dead and return. Add a
 common non-returning exception-to-scheduler handoff that captures the frame,
-drops locks, and switches away on the task's kernel stack. Never resume the
-faulting RIP; never reuse the active stack early; never hold process or
-scheduler locks through handoff.
+marks Process and Task Exiting, and releases all locks while IF remains
+clear. Only after that state is safe may the terminal handoff deliberately
+enable maskable timer progress (for this single-core PIT design, a loop
+equivalent to the proven `sti; hlt` task-exit wait). The next timer interrupt
+must save the exiting context and select away; it must never requeue or
+return to the faulting RIP. Do not reuse the outgoing kernel stack while
+the timer/assembly path is still executing on it. Record pending Zombie
+completion at scheduling time, but finalize Zombie only from a post-stack-
+adoption hook or continuation on the selected task's stack, after the old
+stack is inactive. No process or scheduler lock crosses this handoff.
 
 ## 16. AddressSpace and frame ownership
 
@@ -314,26 +348,36 @@ kernel stack.
 
 ## 19. TSS.RSP0 and CPL3 preemption
 
-Selecting user task B requires choosing B's AddressSpace and kernel-stack
-top, loading B's root if needed, setting TSS.RSP0 to B top, then restoring B
-context and `iretq` to CPL3. Do all handoff work with IF clear. Set RSP0
-before CPL3 return and never point it at an old/reused stack.
+Immediately before every `iretq` that returns to CPL3, TSS.RSP0 MUST contain
+the validated kernel-stack top belonging to that exact selected userspace
+Task. Selecting user task B therefore chooses B's AddressSpace and kernel
+stack, loads B's root if needed, sets RSP0 to B's top, then restores B's
+context and returns to CPL3. For bootstrap or kernel-task execution, use the
+existing static 0.0.8 syscall stack as a kernel-lifetime fallback; RSP0 does
+not participate in same-CPL0 interrupt entry and need not identify the
+current kernel Task. On user A → kernel/bootstrap, restore that fallback so
+RSP0 does not point at A's stack once it can be reused. On user A → user B,
+set B's top before B's iretq. Do all CR3/RSP0/context handoff with IF clear.
 
 Future timer order: hardware enters on current CPL stack or task RSP0;
 assembly saves all GPRs and full frame; Rust records tick/accounting and
 captures current context; under scheduler lock update state/select a small
 SwitchPlan; release lock; send PIC EOI; switch CR3 while current kernel stack
-and code are mapped in destination; update RSP0; return selected context
+and code are mapped in destination; set RSP0 to the selected user Task top,
+or the safe fallback for a kernel/bootstrap target; return selected context
 pointer; assembly adopts RSP, restores registers and `iretq`. No process or
 scheduler lock crosses EOI, CR3 switch, RSP adoption or iretq. IF remains
 clear, preventing maskable same-core reentrancy during transition. NMI and
-double fault require shared mappings/IST treatment.
+double fault require shared mappings/IST treatment. A terminal exit/fault
+path is the deliberate exception to ordinary syscall non-preemption: after
+all mutable syscall/exception work is complete, state is Exiting and locks
+are released, it explicitly permits the PIT handoff as described below.
 
 | Transition | CR3 | RSP0 |
 |---|---|---|
-| kernel task A → kernel task B | unchanged kernel root | set/retain B top before future user return |
+| kernel task A → kernel task B | unchanged kernel root | safe static fallback remains; RSP0 is not B's current stack |
 | kernel → user A | kernel → A | set A top before iretq |
-| user A → kernel | A → kernel | set selected kernel-task top |
+| user A → kernel/bootstrap | A → kernel | restore safe static fallback before A's stack can be reused |
 | user A → user A | unchanged | restore A top |
 | user A → user B | A → B | set B top |
 
@@ -414,26 +458,47 @@ unqueued throughout. No stale RAM reaches userspace.
 
 ## 25. Process creation transaction
 
-Reserve slot/generation, checked PID, parent/name/create tick; create
+Reserve process slot/generation, checked PID, parent/name/create tick; create
 AddressSpace and audited kernel mappings; parse/validate ELF; allocate/map/
-zero segments and stack; prepare scheduler task/context; verify selectors,
-RIP/RSP/permissions; then publish Alive and enqueue. Before publication no
-task is runnable. On failure cancel task reservation and return metadata to
-Vacant/Retired. Allocated frames/tables cannot be returned by the monotonic
-allocator and remain kernel-lifetime owned; record retained allocations.
-Consume PIDs on failed creation rather than reuse them.
+zero segments and stack. Prepare/reserve a scheduler task slot, kernel stack
+and synthetic context, but keep it unqueued and unrunnable. Verify selectors,
+RIP/RSP/permissions and the Process/Task pairing. With interrupts masked,
+atomically enqueue the prepared task and publish Process Alive while holding
+the locks in the documented order. Queue capacity and task-slot availability
+must be checked before publication; queue insertion must not partially
+succeed. If reservation, validation or capacity fails, cancel the prepared
+task, return process metadata to Vacant (or Retired if a future reservation
+cannot advance its generation), and leave no runnable task. Allocated
+frames/tables cannot be returned by the monotonic allocator and remain
+kernel-lifetime owned; record retained allocations. Consume PIDs and any
+reserved ProcessId generation on failed creation rather than reuse them.
+The invariant is bidirectional: no runnable Task refers to a non-Alive
+Process, and no Process is externally observable Alive without a prepared
+primary Task that was successfully enqueued.
 
 ## 26. Exit, fault termination, Zombie and reap
 
-On `exit(status)`, user code enters `int 0x80`; mark Process Alive→Exiting
-and Task Running→Exiting, then never return to user. Stay on its kernel stack
-until later timer handoff saves it and switches away. Only then mark task
-inactive/Exited and process Zombie. Do not release root or stack while
-execution still uses either. User faults follow the same lifecycle with
-`Fault(...)`; no path returns to faulting RIP. An internal reaper accepts
-only Zombie with no executing task, invalidates ProcessId by checked
-generation advance (or retirement), removes metadata and never recycles PID.
-Public waitpid is not required now.
+Ordinary syscall handlers remain non-preemptible: the `int 0x80` gate clears
+IF, mutable syscall work completes, and the handler returns normally through
+`iretq`. Terminal `exit(status)` is different. It marks Process Alive→Exiting
+and Task Running→Exiting under the required locks, releases every lock, then
+enters a non-returning exit handoff. Only after that state is safe does the
+single-core handoff explicitly permit maskable timer progress, using a loop
+equivalent to the stable kernel-task `sti; hlt` wait. The PIT interrupt saves
+the exit context and schedules another task; the exit syscall never returns
+to userspace. This deliberate scheduler transfer does not make ordinary
+syscall code preemptible.
+
+User faults follow the same terminal sequence: capture trusted scalar
+`Fault(...)` metadata, mark Process and Task Exiting, release locks, then
+permit the timer handoff. No path returns to the faulting RIP. The scheduler
+records pending completion when it saves the exiting context, but Process
+becomes Zombie only after a post-stack-adoption hook/continuation confirms
+the old kernel stack is inactive. Do not release its root or stack before
+then. An internal reaper accepts only Zombie with no executing task, changes
+it to Vacant (making the old ProcessId invalid immediately), and removes
+metadata. Generation advances only on a later reservation; PID is never
+recycled. Public waitpid is not required now.
 
 ## 27. Accounting and process names
 
@@ -557,16 +622,16 @@ manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
 
 ## 34. Implementation phases
 
-1. **A:** ProcessId, checked monotonic PID, lifecycle, bounded table, snapshots.
+1. **A:** ProcessId reservation-generation semantics, checked monotonic PID, lifecycle, bounded table, snapshots.
 2. **B:** mapping inventory/audit, inactive-root AddressSpace construction, kernel mapping clone; fail boot if invariant is unproven.
 3. **C:** per-task kernel stack and checked RSP0 update; user stack layout.
 4. **D:** hostile-input ELF validation, mapping permissions and zeroing.
 5. **E:** TaskKind/process handle, kernel stack top and synthetic CPL3 context (not yet runnable).
 6. **F:** CR3 switch backend and lock-free SwitchPlan handoff; kernel/user root transition tests.
 7. **G:** CPL3 timer preemption for all transition cases.
-8. **H:** non-preemptible getpid/exit syscall path and two-phase exit.
+8. **H:** non-preemptible ordinary syscall path, getpid and non-returning exit policy, explicit IF-safe exit handoff and deferred Zombie completion.
 9. **I:** checked page-chunk user-copy and negative pointer tests.
-10. **J:** exception scheduler handoff, fault containment, Zombie and internal reap.
+10. **J:** exception scheduler handoff with explicit IF enable after Exiting publication, fault containment, deferred Zombie completion and internal reap.
 11. **K:** accounting and deterministic QEMU scenarios.
 12. **L:** security review of mappings, transitions, locks, ownership and capacity.
 13. **M:** separate implementation PR and review.
