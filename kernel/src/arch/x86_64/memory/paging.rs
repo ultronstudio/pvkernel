@@ -2,8 +2,8 @@
 //!
 //! Every function here operates on a caller-supplied [`OffsetPageTable`] and
 //! [`BootFrameAllocator`] rather than reaching into global state directly;
-//! [`super::address_space`] owns the single, lock-protected instance of
-//! both that pvKernel actually uses.
+//! [`super::address_space`] owns the lock-protected kernel instance and
+//! creates scoped mappers for inactive process roots.
 
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -183,8 +183,8 @@ pub fn page_at(addr: VirtAddr) -> Result<Page<Size4KiB>, MemoryError> {
 ///
 /// Allocates any missing intermediate page tables from `frame_allocator`.
 /// Flushes the mapped page's TLB entry before returning on success.
-pub fn map_page(
-    mapper: &mut OffsetPageTable<'static>,
+pub fn map_page<'a>(
+    mapper: &mut OffsetPageTable<'a>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     page: Page<Size4KiB>,
     frame: PhysFrame<Size4KiB>,
@@ -218,8 +218,8 @@ pub fn map_page(
 /// Note that the returned frame is not returned to any allocator: this
 /// milestone's [`super::frame_allocator::BootFrameAllocator`] cannot accept
 /// it back, so callers must not treat the frame as reusable.
-pub fn unmap_page(
-    mapper: &mut OffsetPageTable<'static>,
+pub fn unmap_page<'a>(
+    mapper: &mut OffsetPageTable<'a>,
     page: Page<Size4KiB>,
 ) -> Result<PhysFrame<Size4KiB>, MemoryError> {
     match mapper.unmap(page) {
@@ -235,8 +235,8 @@ pub fn unmap_page(
 
 /// Changes the permissions of an existing mapping and flushes its TLB
 /// entry.
-pub fn update_permissions(
-    mapper: &mut OffsetPageTable<'static>,
+pub fn update_permissions<'a>(
+    mapper: &mut OffsetPageTable<'a>,
     page: Page<Size4KiB>,
     permissions: Permissions,
 ) -> Result<(), MemoryError> {
@@ -260,7 +260,7 @@ pub fn update_permissions(
 /// Translates `addr` to a physical address, distinguishing an unmapped
 /// address from a huge-page mapping. Never panics on an ordinary unmapped
 /// address.
-pub fn translate(mapper: &OffsetPageTable<'static>, addr: VirtAddr) -> Translation {
+pub fn translate(mapper: &OffsetPageTable<'_>, addr: VirtAddr) -> Translation {
     match mapper.translate(addr) {
         TranslateResult::Mapped {
             frame: MappedFrame::Size4KiB(frame),

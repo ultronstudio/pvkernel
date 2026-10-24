@@ -1,8 +1,10 @@
 # pvKernel 0.0.9 process architecture
 
-**Status:** design for human review; no process implementation is present in
-pvKernel 0.0.8. This document describes the stable repository at
-`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`.
+**Status:** authoritative 0.0.9 design; implementation in progress. The
+stable-baseline sections describe pvKernel 0.0.8 at
+`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity and
+Phase B boot-mapping audit/inactive-root construction are now implemented on
+the 0.0.9 branch; userspace scheduling and CR3 activation are not yet present.
 
 ## 1. Scope and goals
 
@@ -11,7 +13,7 @@ isolated userspace processes. Its central rule is: **Process** owns an
 address space and process-wide resources; **Task** is a schedulable execution
 context. The first implementation may have one user task per process, while
 leaving process identity independent of that initial one-to-one relationship.
-This is design only; it does not change v0.0.8 or implement any feature below.
+The detailed decisions below remain the design contract for the implementation.
 
 ## 2. Current 0.0.8 baseline
 
@@ -92,16 +94,25 @@ restore the safe fallback before the outgoing user stack can become reusable.
 ## 6. Current paging, userspace and syscall facts
 
 `memory::init` rejects `CR4.LA57`, verifies NX/write-protect prerequisites,
-reads active CR3 and builds one `OffsetPageTable` using the bootloader's
-physical-memory offset. The active PML4 is reached at offset + CR3 physical
-address. `KernelAddressSpace` and monotonic `BootFrameAllocator` live behind
-one `Once<Mutex<_>>`. `map_new_page`, unmap, permission update and translate
-operate on that active root only. Missing intermediate tables use the frame
-allocator. Mapping/permission changes flush the changed active page; unmap
-flushes but frames are not reusable. There is no inactive-root API, page
-table ownership registry or recursive mapping. The bootloader's physical
-mapping covers usable physical memory at a dynamically chosen offset and is
-needed to access page-table frames.
+reads active CR3 and builds the kernel `OffsetPageTable` using the
+bootloader's physical-memory offset. `KernelAddressSpace` and monotonic
+`BootFrameAllocator` live behind one `Once<Mutex<_>>`. The runtime boot audit
+checks the dynamic mapping inventory, kernel ELF `PT_LOAD` permissions, and
+every present upper-half page-table entry for USER clear. `create_address_space`
+allocates a zeroed inactive root, copies only audited PML4 entries 256..511,
+and never copies lower-half entries. Inactive `OffsetPageTable` operations
+allocate intermediate tables through the boot allocator and never switch
+CR3. `AddressSpace` maps zeroed user frames only in the accepted lower-half
+range and tracks mapped-user-page count; page-table leaves are the mapping
+inventory. Frames remain monotonic and are not reclaimed. The bootloader's
+physical map is used to reach inactive page-table frames.
+
+QEMU's address-space smoke creates two roots, maps the same user VA to distinct
+frames, writes distinct values, and verifies those values through the
+supervisor physical map. It also checks that a kernel task-stack VA translates
+to the same physical frame in both roots with USER clear, and that low and
+upper-bound user pages remain unmapped. This validates root construction, not
+CR3 switching or scheduled userspace execution.
 
 The active root starts with bootloader mappings. Kernel image, boot stack,
 boot info, framebuffer and physical-memory mapping use dynamic placement;
@@ -348,9 +359,9 @@ are not required by live kernel state and are deliberately omitted. Any
 required lower-half mapping or USER bit in the kernel half fails closed before
 a process root can be activated.
 
-New roots must remain reachable through the shared physical mapping. The
-current active-only mapper cannot do this; inactive-root construction and
-ownership-safe mapping are prerequisites. CR3 switching correctness requires
+New roots remain reachable through the shared physical mapping. Inactive-root
+construction is implemented and covered by the QEMU smoke test. CR3 switching
+correctness requires
 the executing kernel stack, switch assembly, scheduler state, GDT, IDT and
 TSS to remain mapped at identical VAs in the target. The mapping audit and
 clone verification establish that invariant; failure to establish it blocks

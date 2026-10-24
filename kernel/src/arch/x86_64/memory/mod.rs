@@ -36,7 +36,7 @@ use x86_64::{
     structures::paging::PageTableFlags,
 };
 
-pub use address_space::with_kernel_address_space;
+pub use address_space::{AddressSpace, AddressSpaceError, with_kernel_address_space};
 pub use paging::{Permissions, Translation};
 
 use frame_allocator::BootFrameAllocator;
@@ -232,6 +232,96 @@ pub fn run_heap_smoke_tests() {
     #[cfg(feature = "qemu-test")]
     frame_allocator::run_cursor_regression_test();
     heap::run_smoke_tests();
+}
+
+/// Exercises inactive-root construction without scheduling userspace. The
+/// same lower-half VA must resolve to distinct frames in two roots, while
+/// the active kernel mapping is shared supervisor-only in both.
+#[cfg(feature = "qemu-test")]
+pub fn run_address_space_smoke_test() {
+    use x86_64::structures::paging::{Page, PageSize, PageTableFlags, Size4KiB};
+
+    kprintln!("[process-test] checking inactive address-space roots");
+    with_kernel_address_space(|kernel| {
+        let mut a = kernel
+            .create_address_space()
+            .expect("failed to create process A address space");
+        let mut b = kernel
+            .create_address_space()
+            .expect("failed to create process B address space");
+        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(USER_MIN))
+            .expect("USER_MIN must be page aligned");
+        let frame_a = a
+            .map_new_user_page(kernel, page, Permissions::USER_DATA)
+            .expect("failed to map process A test page");
+        let frame_b = b
+            .map_new_user_page(kernel, page, Permissions::USER_DATA)
+            .expect("failed to map process B test page");
+        assert_ne!(frame_a, frame_b, "process roots aliased one user frame");
+        a.write_user_page(kernel, page, 0, &[0xAA])
+            .expect("failed to initialize process A page");
+        b.write_user_page(kernel, page, 0, &[0xBB])
+            .expect("failed to initialize process B page");
+
+        for (space, frame, expected) in [(&mut a, frame_a, 0xAA), (&mut b, frame_b, 0xBB)] {
+            match space
+                .translate(kernel, VirtAddr::new(USER_MIN))
+                .expect("inactive root translation failed")
+            {
+                Translation::Mapped { phys_addr, flags } => {
+                    assert_eq!(phys_addr, frame.start_address());
+                    assert!(flags.contains(PageTableFlags::USER_ACCESSIBLE));
+                    assert!(flags.contains(PageTableFlags::WRITABLE));
+                    assert!(flags.contains(PageTableFlags::NO_EXECUTE));
+                    let alias = kernel
+                        .physical_alias(phys_addr)
+                        .expect("user test frame lacks supervisor physical alias");
+                    // SAFETY: each tested frame was uniquely allocated and
+                    // zeroed, and the corresponding alias was verified as a
+                    // present supervisor mapping while IRQs are masked.
+                    let value = unsafe { alias.as_ptr::<u8>().read_volatile() };
+                    assert_eq!(value, expected);
+                }
+                other => panic!("test page missing from inactive root: {other:?}"),
+            }
+        }
+        assert_eq!(a.mapped_user_pages(), 1);
+        assert_eq!(b.mapped_user_pages(), 1);
+
+        let (stack_low, _) =
+            crate::arch::x86_64::task::stack_bounds(0).expect("kernel stack slot zero must exist");
+        let kernel_translation = kernel.translate(VirtAddr::new(stack_low));
+        for space in [&mut a, &mut b] {
+            match space
+                .translate(kernel, VirtAddr::new(stack_low))
+                .expect("shared kernel stack translation failed")
+            {
+                Translation::Mapped { phys_addr, flags } => {
+                    match kernel_translation {
+                        Translation::Mapped {
+                            phys_addr: expected,
+                            ..
+                        } => assert_eq!(phys_addr, expected),
+                        other => panic!("active kernel stack missing: {other:?}"),
+                    }
+                    assert!(!flags.contains(PageTableFlags::USER_ACCESSIBLE));
+                }
+                other => panic!("kernel stack absent in process root: {other:?}"),
+            }
+        }
+        for address in [0x8000, USER_MAX - Size4KiB::SIZE] {
+            assert!(matches!(
+                a.translate(kernel, VirtAddr::new(address)).unwrap(),
+                Translation::NotMapped
+            ));
+        }
+        assert!(paging::canonical_virt_addr(USER_MAX).is_err());
+        assert!(matches!(
+            kernel.translate(VirtAddr::new(USER_MIN)),
+            Translation::NotMapped
+        ));
+    });
+    kprintln!("[process-test] inactive roots, isolation, and shared kernel mappings passed");
 }
 
 #[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]
