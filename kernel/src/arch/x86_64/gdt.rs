@@ -268,6 +268,15 @@ pub fn user_code_selector() -> SegmentSelector {
         .user_code_selector
 }
 
+/// Returns the ring-0 code selector installed by [`init`], for constructing
+/// synthetic kernel-task interrupt-return frames.
+pub fn kernel_code_selector() -> SegmentSelector {
+    GDT.get()
+        .expect("gdt::init has not run yet")
+        .1
+        .code_selector
+}
+
 /// Returns the ring-3 user data segment selector (RPL 3) installed by
 /// [`init`]. Used for the `SS` (and, informally, `DS`/`ES`) value in an
 /// `iretq` frame that enters CPL3.

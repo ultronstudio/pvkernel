@@ -48,7 +48,13 @@ pub fn init() {
                 .set_stack_index(DOUBLE_FAULT_IST_INDEX);
         }
 
-        idt[IrqLine::Timer.vector()].set_handler_fn(timer_interrupt_handler);
+        // SAFETY: the dedicated assembly entry saves all GPRs and the
+        // interrupt-return frame before calling Rust; unlike the Rust
+        // `x86-interrupt` ABI, it can return a different saved context.
+        unsafe {
+            idt[IrqLine::Timer.vector()]
+                .set_handler_addr(VirtAddr::new(super::task::timer_irq_entry()));
+        }
         idt[IrqLine::Keyboard.vector()].set_handler_fn(irq1_handler);
         idt[IrqLine::Cascade.vector()].set_handler_fn(irq2_handler);
         idt[IrqLine::Com2.vector()].set_handler_fn(irq3_handler);
@@ -107,6 +113,22 @@ pub fn run_breakpoint_test() {
 static EXPECTED_PAGE_FAULT: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "qemu-test")]
 static EXPECTED_PAGE_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(feature = "qemu-test", feature = "task-stack-guard-fault-test"))]
+static EXPECTED_TASK_GUARD_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(feature = "qemu-test", feature = "task-stack-guard-fault-test"))]
+static EXPECTED_TASK_GUARD_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "task-stack-guard-fault-test")]
+pub(crate) fn arm_expected_task_stack_guard_fault(address: u64) {
+    #[cfg(feature = "qemu-test")]
+    {
+        EXPECTED_TASK_GUARD_FAULT_ADDRESS.store(address, Ordering::Relaxed);
+        EXPECTED_TASK_GUARD_FAULT_ARMED.store(true, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "qemu-test"))]
+    let _ = address;
+}
 
 /// Set while the `userspace-privilege-fault-test` scenario's deliberate
 /// CPL3 `cli` fault is in flight. Only meaningful under `qemu-test`; without
@@ -303,6 +325,21 @@ extern "x86-interrupt" fn page_fault_handler(
     let faulting_address = Cr2::read_raw();
     let cpl = stack_frame.code_segment.rpl();
 
+    #[cfg(all(feature = "qemu-test", feature = "task-stack-guard-fault-test"))]
+    if EXPECTED_TASK_GUARD_FAULT_ARMED.load(Ordering::Relaxed)
+        && faulting_address == EXPECTED_TASK_GUARD_FAULT_ADDRESS.load(Ordering::Relaxed)
+        && cpl == x86_64::PrivilegeLevel::Ring0
+        && !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && !error_code.contains(PageFaultErrorCode::USER_MODE)
+        && !error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && !error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH)
+    {
+        EXPECTED_TASK_GUARD_FAULT_ARMED.store(false, Ordering::Relaxed);
+        kprintln!("[exception] expected task guard page fault matched at {faulting_address:#x}");
+        kprintln!("[scheduler-test] task stack guard fault passed");
+        qemu::exit_success();
+    }
+
     #[cfg(all(feature = "qemu-test", feature = "supervisor-write-protection-test"))]
     if take_expected_write_protection_fault_if_matches(faulting_address, cpl, error_code) {
         kprintln!("[exception] page fault");
@@ -375,27 +412,6 @@ extern "x86-interrupt" fn double_fault_handler(
     kprintln!("error code: {:#x}", error_code);
     kprintln!("{:#?}", stack_frame);
     fatal_exit();
-}
-
-/// IRQ0 / vector 32. Records the tick before sending EOI, so a tick is never
-/// counted as delivered before the kernel has actually observed it. Must not
-/// log, allocate, lock, or format text: any of those could stall or recurse
-/// while interrupting arbitrary kernel state.
-///
-/// Under `userspace-syscall-test`, also records (in a single atomic store,
-/// no lock, no formatting) whether this tick interrupted CPL3 execution -
-/// this is the only instrumentation the userspace syscall test needs, and
-/// it must stay this cheap so the fast path above is never affected.
-#[cfg_attr(not(feature = "userspace-syscall-test"), allow(unused_variables))]
-extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
-    super::pit::record_tick();
-
-    #[cfg(feature = "userspace-syscall-test")]
-    if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
-        super::syscall::test::TIMER_INTERRUPTED_CPL3.store(true, Ordering::Relaxed);
-    }
-
-    pic::notify_end_of_interrupt(IrqLine::Timer);
 }
 
 /// IRQ7 / vector 39. A spurious IRQ7 is raised by the master PIC itself (for
