@@ -290,6 +290,15 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    let cpl = stack_frame.code_segment.rpl();
+    if cpl == x86_64::PrivilegeLevel::Ring3 && crate::task::current_user_process_id().is_some() {
+        crate::task::terminate_current_user_fault(
+            6,
+            None,
+            None,
+            stack_frame.instruction_pointer.as_u64(),
+        );
+    }
     kprintln!("[exception] invalid opcode");
     kprintln!("{:#?}", stack_frame);
     fatal_exit();
@@ -300,6 +309,15 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     error_code: u64,
 ) {
     let cpl = stack_frame.code_segment.rpl();
+
+    if cpl == x86_64::PrivilegeLevel::Ring3 && crate::task::current_user_process_id().is_some() {
+        crate::task::terminate_current_user_fault(
+            13,
+            Some(error_code),
+            None,
+            stack_frame.instruction_pointer.as_u64(),
+        );
+    }
 
     #[cfg(all(feature = "qemu-test", feature = "userspace-privilege-fault-test"))]
     if take_expected_privilege_fault_if_matches(cpl) {
@@ -394,6 +412,15 @@ extern "x86-interrupt" fn page_fault_handler(
         kprintln!("{:#?}", stack_frame);
         kprintln!("[test] expected CPL3 supervisor-page fault matched");
         qemu::exit_success();
+    }
+
+    if cpl == x86_64::PrivilegeLevel::Ring3 && crate::task::current_user_process_id().is_some() {
+        crate::task::terminate_current_user_fault(
+            14,
+            Some(error_code.bits()),
+            Some(faulting_address),
+            stack_frame.instruction_pointer.as_u64(),
+        );
     }
 
     kprintln!("[exception] page fault");

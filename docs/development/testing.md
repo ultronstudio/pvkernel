@@ -97,6 +97,10 @@ timeout 60 cargo run --features process-smoke-test -- --headless-test
 # rejection before any partial destination update.
 timeout 60 cargo run --features user-copy-test -- --headless-test
 
+# Three process-owned CPL3 tasks trigger #PF, #GP, and #UD; the kernel checks
+# saved fault metadata and deferred Zombie completion before reaping them.
+timeout 60 cargo run --features user-fault-containment-test -- --headless-test
+
 # Expected task stack lower-guard page fault.
 timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
 

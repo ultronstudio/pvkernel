@@ -133,6 +133,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::prepare_process_preemption_test();
     #[cfg(feature = "process-smoke-test")]
     task::prepare_process_smoke_test();
+    #[cfg(feature = "user-fault-containment-test")]
+    task::prepare_user_fault_containment_test();
 
     let ticks_before = pit::ticks();
     kprintln!("[test] waiting for timer interrupts");
@@ -151,6 +153,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::wait_for_process_preemption_test();
     #[cfg(feature = "process-smoke-test")]
     task::wait_for_process_smoke_test();
+    #[cfg(feature = "user-fault-containment-test")]
+    task::wait_for_user_fault_containment_test();
 
     #[cfg(feature = "scheduler-preemption-test")]
     task::run_preemption_test();
