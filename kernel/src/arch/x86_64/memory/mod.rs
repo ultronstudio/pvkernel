@@ -445,6 +445,92 @@ pub fn run_user_stack_smoke_test() {
     kprintln!("[process-test] guarded user stack and RSP0 policy passed");
 }
 
+/// Exercises page-chunked user-copy validation and transfer against an
+/// inactive process root. Invalid ranges must fail before either destination
+/// buffer or user memory is partially changed.
+#[cfg(feature = "user-copy-test")]
+pub fn run_user_copy_test() {
+    use x86_64::structures::paging::{Page, PageSize, Size4KiB};
+
+    const FIRST: u64 = USER_MIN;
+    const SECOND: u64 = USER_MIN + Size4KiB::SIZE;
+    const READ_ONLY: u64 = USER_MIN + 4 * Size4KiB::SIZE;
+    const SUPERVISOR: u64 = USER_MIN + 5 * Size4KiB::SIZE;
+
+    kprintln!("[process-test] checking safe cross-page user copies");
+    with_kernel_address_space(|kernel| {
+        let mut space = kernel
+            .create_address_space()
+            .expect("failed to create user-copy test root");
+        for base in [FIRST, SECOND] {
+            space
+                .map_new_user_page(
+                    kernel,
+                    Page::<Size4KiB>::from_start_address(VirtAddr::new(base)).unwrap(),
+                    Permissions::USER_DATA,
+                )
+                .expect("failed to map writable user-copy page");
+        }
+        space
+            .map_new_user_page(
+                kernel,
+                Page::<Size4KiB>::from_start_address(VirtAddr::new(READ_ONLY)).unwrap(),
+                Permissions::USER_READ_ONLY,
+            )
+            .expect("failed to map read-only user-copy page");
+        space
+            .map_test_supervisor_page(
+                kernel,
+                Page::<Size4KiB>::from_start_address(VirtAddr::new(SUPERVISOR)).unwrap(),
+            )
+            .expect("failed to map supervisor-only negative-test page");
+
+        let first_bytes = [0x10, 0x20, 0x30, 0x40];
+        space
+            .copy_to_user(kernel, FIRST + 8, &first_bytes)
+            .expect("same-page copy_to_user failed");
+        let mut copied = [0; 4];
+        space
+            .copy_from_user(kernel, FIRST + 8, &mut copied)
+            .expect("same-page copy_from_user failed");
+        assert_eq!(copied, first_bytes);
+
+        let crossing = [0xA1, 0xA2, 0xB1, 0xB2];
+        let cross_address = FIRST + Size4KiB::SIZE - 2;
+        space
+            .copy_to_user(kernel, cross_address, &crossing)
+            .expect("cross-page copy_to_user failed");
+        let mut cross_output = [0; 4];
+        space
+            .copy_from_user(kernel, cross_address, &mut cross_output)
+            .expect("cross-page copy_from_user failed");
+        assert_eq!(cross_output, crossing);
+
+        for (address, length) in [
+            (0, 1),
+            (0xFFFF, 2),
+            (TEMP_MAPPING_BASE, 1),
+            (USER_MAX, 1),
+            (u64::MAX - 1, 8),
+            (SECOND + Size4KiB::SIZE - 1, 2),
+            (SUPERVISOR, 1),
+        ] {
+            let mut rejected = [0xCC; 16];
+            let result = space.copy_from_user(kernel, address, &mut rejected[..length.min(16)]);
+            assert!(result.is_err(), "copy_from_user accepted {address:#x}");
+            assert_eq!(
+                rejected, [0xCC; 16],
+                "failed read partially modified output"
+            );
+        }
+        assert!(space.copy_to_user(kernel, READ_ONLY, &[0x55]).is_err());
+        assert!(space.copy_to_user(kernel, SUPERVISOR, &[0x55]).is_err());
+        assert!(space.copy_from_user(kernel, 0, &mut []).is_ok());
+        assert!(space.copy_to_user(kernel, u64::MAX, &[]).is_ok());
+        kprintln!("[process-test] user-copy positive and negative cases passed");
+    });
+}
+
 #[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]
 pub(crate) fn take_expected_heap_guard_fault(
     address: u64,

@@ -93,6 +93,10 @@ timeout 60 cargo run --features process-preemption-test -- --headless-test
 # observes deferred Zombie publication and reaps the process.
 timeout 60 cargo run --features process-smoke-test -- --headless-test
 
+# Page-chunked user copies, including cross-page transfer and hostile-pointer
+# rejection before any partial destination update.
+timeout 60 cargo run --features user-copy-test -- --headless-test
+
 # Expected task stack lower-guard page fault.
 timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
 

@@ -102,6 +102,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::run_prepared_user_task_test();
     #[cfg(feature = "qemu-test")]
     arch::x86_64::memory::run_user_stack_smoke_test();
+    #[cfg(feature = "user-copy-test")]
+    arch::x86_64::memory::run_user_copy_test();
     #[cfg(feature = "qemu-test")]
     process::elf::run_loader_qemu_tests();
 

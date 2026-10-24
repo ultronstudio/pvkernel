@@ -189,6 +189,29 @@ impl AddressSpace {
         }
     }
 
+    /// Installs a supervisor-only PTE inside the user range for the
+    /// user-copy negative test. This mapping is never exposed to a process
+    /// task and is not part of the production mapping API.
+    #[cfg(feature = "user-copy-test")]
+    pub(crate) fn map_test_supervisor_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_address(page.start_address())?;
+        if !matches!(
+            self.translate(kernel, page.start_address())?,
+            Translation::NotMapped
+        ) {
+            return Err(AddressSpaceError::UserPageAlreadyMapped);
+        }
+        let frame = kernel.allocate_zeroed_frame()?;
+        kernel.with_inactive_mapper(self, |mapper, allocator| {
+            paging::map_page(mapper, allocator, page, frame, Permissions::KERNEL_DATA)
+        })?;
+        Ok(())
+    }
+
     /// Test-only shared user page mapping for the CPL3 preemption handshake.
     /// This is not a production shared-memory API; it maps only the frame
     /// allocated by the paired deterministic QEMU test.
@@ -326,6 +349,139 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Copies a complete userspace range into a kernel buffer without ever
+    /// dereferencing the userspace virtual address. The full range is
+    /// validated before bytes are copied, so an invalid later page cannot
+    /// produce a partial kernel buffer update.
+    ///
+    /// This is safe for the 0.0.9 single-core model: user mappings cannot be
+    /// changed while a syscall runs (IF is clear), and there is no user
+    /// remapping, userspace threading, or SMP. Those assumptions must be
+    /// revisited before adding any such feature.
+    pub fn copy_from_user(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        user_address: u64,
+        output: &mut [u8],
+    ) -> Result<(), AddressSpaceError> {
+        let range = validate_copy_range(user_address, output.len())?;
+        if output.is_empty() {
+            return Ok(());
+        }
+        self.validate_copy_pages(kernel, range, false)?;
+        self.copy_user_chunks(
+            kernel,
+            range,
+            output.len(),
+            output.as_ptr(),
+            output.as_mut_ptr(),
+            CopyDirection::FromUser,
+        )
+    }
+
+    /// Copies a complete kernel buffer into a writable userspace range
+    /// through supervisor-only physical aliases. No raw user virtual pointer
+    /// is passed to memcpy/copy_nonoverlapping.
+    pub fn copy_to_user(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        user_address: u64,
+        input: &[u8],
+    ) -> Result<(), AddressSpaceError> {
+        let range = validate_copy_range(user_address, input.len())?;
+        if input.is_empty() {
+            return Ok(());
+        }
+        self.validate_copy_pages(kernel, range, true)?;
+        self.copy_user_chunks(
+            kernel,
+            range,
+            input.len(),
+            input.as_ptr(),
+            core::ptr::null_mut(),
+            CopyDirection::ToUser,
+        )
+    }
+
+    fn validate_copy_pages(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        range: CopyRange,
+        writable: bool,
+    ) -> Result<(), AddressSpaceError> {
+        let mut address = range.start;
+        while address < range.end {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(address));
+            match self.translate(kernel, VirtAddr::new(address))? {
+                Translation::Mapped { flags, .. }
+                    if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                        && (!writable || flags.contains(PageTableFlags::WRITABLE)) => {}
+                _ => return Err(AddressSpaceError::InvalidCopyRange),
+            }
+            address = page
+                .start_address()
+                .as_u64()
+                .checked_add(Size4KiB::SIZE)
+                .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        }
+        Ok(())
+    }
+
+    fn copy_user_chunks(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        range: CopyRange,
+        buffer_len: usize,
+        source: *const u8,
+        destination: *mut u8,
+        direction: CopyDirection,
+    ) -> Result<(), AddressSpaceError> {
+        let mut address = range.start;
+        let mut offset = 0usize;
+        while address < range.end {
+            let page_offset = (address as usize) & (Size4KiB::SIZE as usize - 1);
+            let page_remaining = Size4KiB::SIZE as usize - page_offset;
+            let remaining = buffer_len - offset;
+            let chunk_len = core::cmp::min(page_remaining, remaining);
+            let physical = match self.translate(kernel, VirtAddr::new(address))? {
+                Translation::Mapped { phys_addr, flags }
+                    if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                        && (direction == CopyDirection::FromUser
+                            || flags.contains(PageTableFlags::WRITABLE)) =>
+                {
+                    phys_addr
+                }
+                _ => return Err(AddressSpaceError::InvalidCopyRange),
+            };
+            let alias = kernel.physical_alias(physical)?;
+            // SAFETY: the preceding translation is for this page chunk,
+            // validates effective USER access (and WRITE for ToUser), and
+            // physical_alias validates a supervisor-only mapped physical
+            // address. The kernel buffer is a valid uniquely borrowed slice.
+            unsafe {
+                match direction {
+                    CopyDirection::FromUser => core::ptr::copy_nonoverlapping(
+                        alias.as_ptr::<u8>(),
+                        destination.add(offset),
+                        chunk_len,
+                    ),
+                    CopyDirection::ToUser => core::ptr::copy_nonoverlapping(
+                        source.add(offset),
+                        alias.as_mut_ptr::<u8>(),
+                        chunk_len,
+                    ),
+                }
+            }
+            offset = offset
+                .checked_add(chunk_len)
+                .ok_or(AddressSpaceError::InvalidCopyRange)?;
+            address = address
+                .checked_add(chunk_len as u64)
+                .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        }
+        Ok(())
+    }
+
     pub fn unmap_user_page(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -378,6 +534,35 @@ impl AddressSpace {
             _ => Err(AddressSpaceError::UserPageNotMapped),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct CopyRange {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyDirection {
+    FromUser,
+    ToUser,
+}
+
+fn validate_copy_range(start: u64, len: usize) -> Result<CopyRange, AddressSpaceError> {
+    if len == 0 {
+        return Ok(CopyRange { start, end: start });
+    }
+    let end = start
+        .checked_add(u64::try_from(len).map_err(|_| AddressSpaceError::InvalidCopyRange)?)
+        .ok_or(AddressSpaceError::InvalidCopyRange)?;
+    if VirtAddr::try_new(start).is_err()
+        || VirtAddr::try_new(end - 1).is_err()
+        || start < super::USER_MIN
+        || end > super::USER_MAX
+    {
+        return Err(AddressSpaceError::InvalidCopyRange);
+    }
+    Ok(CopyRange { start, end })
 }
 
 fn validate_user_address(address: VirtAddr) -> Result<(), AddressSpaceError> {

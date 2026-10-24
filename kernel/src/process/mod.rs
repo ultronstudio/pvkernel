@@ -4,11 +4,12 @@
 //! later layers; this module owns only process policy and bounded metadata.
 
 pub mod elf;
+pub mod user_copy;
 
 use spin::{Mutex, Once};
 
 use crate::{
-    arch::x86_64::memory::{AddressSpace, AddressSpaceHandle},
+    arch::x86_64::memory::{AddressSpace, AddressSpaceError, AddressSpaceHandle},
     kprintln,
     task::TaskId,
 };
@@ -506,6 +507,58 @@ pub(crate) fn address_space_handle(id: ProcessId) -> Result<AddressSpaceHandle, 
         .get()
         .expect("process subsystem used before init");
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_handle(id))
+}
+
+pub(crate) fn copy_from_user(
+    id: ProcessId,
+    address: u64,
+    output: &mut [u8],
+) -> Result<(), AddressSpaceError> {
+    let table = PROCESS_TABLE
+        .get()
+        .ok_or(AddressSpaceError::InvalidCopyRange)?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut table = table.lock();
+        let slot = table
+            .slot_for_mut(id)
+            .map_err(|_| AddressSpaceError::InvalidCopyRange)?;
+        if slot.state != ProcessState::Alive {
+            return Err(AddressSpaceError::InvalidCopyRange);
+        }
+        let address_space = slot
+            .address_space
+            .as_mut()
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            address_space.copy_from_user(kernel, address, output)
+        })
+    })
+}
+
+pub(crate) fn copy_to_user(
+    id: ProcessId,
+    address: u64,
+    input: &[u8],
+) -> Result<(), AddressSpaceError> {
+    let table = PROCESS_TABLE
+        .get()
+        .ok_or(AddressSpaceError::InvalidCopyRange)?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut table = table.lock();
+        let slot = table
+            .slot_for_mut(id)
+            .map_err(|_| AddressSpaceError::InvalidCopyRange)?;
+        if slot.state != ProcessState::Alive {
+            return Err(AddressSpaceError::InvalidCopyRange);
+        }
+        let address_space = slot
+            .address_space
+            .as_mut()
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            address_space.copy_to_user(kernel, address, input)
+        })
+    })
 }
 
 fn run_model_self_tests() {
