@@ -129,12 +129,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::interrupts::run_breakpoint_test();
 
     let scheduler_smoke_tasks = task::prepare_smoke_test();
+    #[cfg(feature = "process-capacity-test")]
+    task::run_process_capacity_test();
+    #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
+    task::prepare_release_userspace_smoke();
     #[cfg(feature = "process-preemption-test")]
     task::prepare_process_preemption_test();
     #[cfg(feature = "process-smoke-test")]
     task::prepare_process_smoke_test();
     #[cfg(feature = "user-fault-containment-test")]
     task::prepare_user_fault_containment_test();
+    #[cfg(feature = "address-space-isolation-test")]
+    task::prepare_address_space_isolation_test();
 
     let ticks_before = pit::ticks();
     kprintln!("[test] waiting for timer interrupts");
@@ -148,6 +154,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     pit::wait_for_ticks(TIMER_TEST_TICKS);
     task::run_smoke_test(scheduler_smoke_tasks.0, scheduler_smoke_tasks.1);
+    #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
+    task::wait_for_release_userspace_smoke();
 
     #[cfg(feature = "process-preemption-test")]
     task::wait_for_process_preemption_test();
@@ -155,6 +163,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::wait_for_process_smoke_test();
     #[cfg(feature = "user-fault-containment-test")]
     task::wait_for_user_fault_containment_test();
+    #[cfg(feature = "address-space-isolation-test")]
+    task::wait_for_address_space_isolation_test();
 
     #[cfg(feature = "scheduler-preemption-test")]
     task::run_preemption_test();

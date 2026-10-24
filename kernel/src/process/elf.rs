@@ -631,7 +631,6 @@ fn test_elf() -> alloc::vec::Vec<u8> {
 /// Builds the embedded process-exit smoke ELF with its expected PID baked
 /// into the test code. This is a deterministic QEMU fixture, not a loader
 /// shortcut or a production executable provider.
-#[cfg(feature = "process-smoke-test")]
 pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
     const ENTRY: u64 = 0x0040_0000;
     const FILE_OFFSET: usize = 0x1000;
@@ -678,16 +677,17 @@ pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
 /// exception immediately. Used only to validate CPL3 fault containment.
 #[cfg(feature = "user-fault-containment-test")]
 pub(crate) fn process_fault_elf(vector: u8) -> alloc::vec::Vec<u8> {
+    process_fault_elf_at(vector, 0x3000_0000)
+}
+
+#[cfg(feature = "user-fault-containment-test")]
+pub(crate) fn process_fault_elf_at(vector: u8, fault_address: u64) -> alloc::vec::Vec<u8> {
     const ENTRY: u64 = 0x0040_0000;
     const FILE_OFFSET: usize = 0x1000;
     let code: &[u8] = match vector {
         6 => &[0x0F, 0x0B],        // UD2
         13 => &[0x0F, 0x20, 0xC0], // MOV RAX, CR0: privileged at CPL3
-        14 => &[
-            // read from a canonical but unmapped user VA
-            0x48, 0xB8, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, // MOV RAX, 0x30000000
-            0x48, 0x8B, 0x00, // MOV RAX, [RAX]
-        ],
+        14 => return process_page_fault_elf(fault_address),
         _ => panic!("unsupported process fault fixture vector"),
     };
 
@@ -714,7 +714,89 @@ pub(crate) fn process_fault_elf(vector: u8) -> alloc::vec::Vec<u8> {
     bytes
 }
 
-#[cfg(feature = "qemu-test")]
+#[cfg(feature = "user-fault-containment-test")]
+fn process_page_fault_elf(fault_address: u64) -> alloc::vec::Vec<u8> {
+    const ENTRY: u64 = 0x0040_0000;
+    const FILE_OFFSET: usize = 0x1000;
+    let mut code = [0u8; 13];
+    code[0..2].copy_from_slice(&[0x48, 0xB8]); // movabs rax, fault_address
+    code[2..10].copy_from_slice(&fault_address.to_le_bytes());
+    code[10..13].copy_from_slice(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+    let mut bytes = alloc::vec![0; FILE_OFFSET + code.len()];
+    bytes[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
+    put_u16(&mut bytes, 16, 2);
+    put_u16(&mut bytes, 18, 62);
+    put_u32(&mut bytes, 20, 1);
+    put_u64(&mut bytes, 24, ENTRY);
+    put_u64(&mut bytes, 32, ELF_HEADER_SIZE as u64);
+    put_u16(&mut bytes, 52, ELF_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 54, PROGRAM_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 56, 1);
+    test_load_header(
+        &mut bytes,
+        64,
+        PF_R | PF_X,
+        FILE_OFFSET as u64,
+        ENTRY,
+        code.len() as u64,
+        code.len() as u64,
+    );
+    bytes[FILE_OFFSET..].copy_from_slice(&code);
+    bytes
+}
+
+/// Builds one ELF for a process-isolation test. Both roots map the same
+/// private VA, and the payload checks its expected per-process value while
+/// repeated PIT/syscall boundaries permit real scheduler switches.
+#[cfg(feature = "address-space-isolation-test")]
+pub(crate) fn process_isolation_elf(expected: u64) -> alloc::vec::Vec<u8> {
+    const ENTRY: u64 = 0x0040_0000;
+    const FILE_OFFSET: usize = 0x1000;
+    const PRIVATE_VA: u64 = 0x0010_0000;
+    let mut code = [0u8; 69];
+    code[0..2].copy_from_slice(&[0x48, 0xB8]); // movabs rax, PRIVATE_VA
+    code[2..10].copy_from_slice(&PRIVATE_VA.to_le_bytes());
+    code[10..13].copy_from_slice(&[0x48, 0x8B, 0x18]); // mov rbx, [rax]
+    code[13..15].copy_from_slice(&[0x48, 0xB9]); // movabs rcx, expected
+    code[15..23].copy_from_slice(&expected.to_le_bytes());
+    code[23..26].copy_from_slice(&[0x48, 0x39, 0xCB]); // cmp rbx, rcx
+    code[26..28].copy_from_slice(&[0x75, 0x1B]); // jne failure
+    code[28..33].copy_from_slice(&[0xB8, 2, 0, 0, 0]); // mov eax, TIMER_TICKS
+    code[33..35].copy_from_slice(&[0xCD, 0x80]);
+    code[35..39].copy_from_slice(&[0x48, 0x83, 0xF8, 30]); // cmp rax, 30
+    code[39..41].copy_from_slice(&[0x72, 0xF3]); // jb loop
+    code[41..46].copy_from_slice(&[0xBF, 0, 0, 0, 0]); // exit(0)
+    code[46..51].copy_from_slice(&[0xB8, 4, 0, 0, 0]);
+    code[51..53].copy_from_slice(&[0xCD, 0x80]);
+    code[53..55].copy_from_slice(&[0x0F, 0x0B]); // unreachable sentinel
+    code[55..60].copy_from_slice(&[0xBF, 1, 0, 0, 0]); // failure: exit(1)
+    code[60..65].copy_from_slice(&[0xB8, 4, 0, 0, 0]);
+    code[65..67].copy_from_slice(&[0xCD, 0x80]);
+    code[67..69].copy_from_slice(&[0x0F, 0x0B]);
+
+    let mut bytes = alloc::vec![0; FILE_OFFSET + code.len()];
+    bytes[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
+    put_u16(&mut bytes, 16, 2);
+    put_u16(&mut bytes, 18, 62);
+    put_u32(&mut bytes, 20, 1);
+    put_u64(&mut bytes, 24, ENTRY);
+    put_u64(&mut bytes, 32, ELF_HEADER_SIZE as u64);
+    put_u16(&mut bytes, 52, ELF_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 54, PROGRAM_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 56, 1);
+    test_load_header(
+        &mut bytes,
+        64,
+        PF_R | PF_X,
+        FILE_OFFSET as u64,
+        ENTRY,
+        code.len() as u64,
+        code.len() as u64,
+    );
+    bytes[FILE_OFFSET..].copy_from_slice(&code);
+    bytes
+}
+
 fn test_load_header(
     bytes: &mut [u8],
     at: usize,
@@ -733,17 +815,14 @@ fn test_load_header(
     put_u64(bytes, at + 48, Size4KiB::SIZE);
 }
 
-#[cfg(feature = "qemu-test")]
 fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
     bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(feature = "qemu-test")]
 fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(feature = "qemu-test")]
 fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
     bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }

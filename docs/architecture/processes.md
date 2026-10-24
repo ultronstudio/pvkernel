@@ -14,7 +14,15 @@ Phase H adds process-aware `getpid` and terminal `exit`, with deferred Zombie
 publication after the outgoing kernel stack becomes inactive; an embedded
 ELF smoke checks PID identity and non-returning exit. Phase I adds central
 page-chunked `copy_from_user`/`copy_to_user` APIs with full-range preflight;
-the dedicated QEMU test covers same/cross-page copies and hostile ranges. Phase J routes CPL3 #PF/#GP/#UD from process Tasks into the terminal exit handoff and defers Zombie publication until a later PIT runs on an adopted stack; its QEMU scenario observes all three faults and reaps their Zombies.
+the dedicated QEMU test covers same/cross-page copies and hostile ranges.
+Phase J routes CPL3 #PF/#GP/#UD from process Tasks into the terminal exit
+handoff and defers Zombie publication until a later PIT runs on an adopted
+stack; its QEMU scenario observes #PF/#GP/#UD, stack-guard and supervisor-
+mapping faults, then reaps their Zombies. Phase K adds saturating PIT-based
+process CPU accounting, a fixed-size `snapshot_all` API, real same-VA/
+different-frame user-process switching, and mixed scheduler/process capacity
+validation. Ordinary boots now run an embedded static userspace smoke ELF
+through the same process and loader path.
 
 ## 1. Scope and goals
 
@@ -321,6 +329,7 @@ context, and never restores the faulting user frame. Zombie is finalized on a
 later PIT after a different stack has been adopted. The QEMU scenario runs
 separate #PF/#GP/#UD processes, checks their scalar metadata and Zombie
 states, then reaps them while the kernel continues.
+
 ## 16. AddressSpace and frame ownership
 
 Create an owned `AddressSpace` abstraction around a root PML4 frame and
