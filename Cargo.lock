@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "bootloader_api",
  "spin",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "pvkernel-runner"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "bootloader",
  "kernel",

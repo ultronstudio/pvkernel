@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.8` — Scheduler + Kernel Tasks
+Version: `0.0.9` — Processes + Address Spaces + Userspace Foundation
 
 Implemented:
 
@@ -42,10 +42,10 @@ Implemented:
 * required NXE and CR0.WP paging invariants, plus a deterministic CPL0
   supervisor write-protection QEMU test
 * deterministic, headless QEMU tests behind the `qemu-test` Cargo feature
-* dedicated ring-3 (CPL3) code/data GDT descriptors and a dedicated
-  TSS.RSP0 ring-transition kernel stack
-* the first CPL0 → CPL3 transition, via `iretq` (test-only, behind Cargo
-  features)
+* dedicated ring-3 (CPL3) code/data GDT descriptors, a kernel-lifetime RSP0
+  fallback, and per-user-task supervisor kernel-entry stacks
+* validated synthetic CPL3 context entry via `iretq`, including both legacy
+  boundary tests and process-owned userspace Tasks
 * a minimal, provisional, scalar-only `int 0x80` syscall ABI
 * `USER_DATA`/`USER_CODE` page permissions, reusing the existing W^X
   mapping API
@@ -64,9 +64,22 @@ Implemented:
 * eight centrally reserved 16 KiB kernel task stacks, supervisor-only RW/NX,
   with unmapped guard pages above and below
 * dedicated timer IRQ context switching with complete general-purpose
-  register and interrupt-frame preservation; CPL3 timer IRQs resume in place
+  register and interrupt-frame preservation; process-owned CPL3 frames are
+  preempted while legacy bootstrap CPL3 tests keep their boundary-test path
 * deterministic QEMU scheduler, CPU-bound preemption, stack-guard, capacity,
   and stale-ID/reuse coverage
+* generation-safe ProcessId handles, monotonic PIDs, and a bounded process
+  lifecycle with Zombie/reap semantics
+* audited per-process address spaces, inactive-root construction, CR3 switching,
+  and same-VA process isolation
+* dedicated user stacks and per-task supervisor kernel-entry stacks, with
+  TSS.RSP0 updates and CPL3 timer preemption
+* checked static ELF64 loading with W^X, zeroed BSS/pages, and an embedded
+  userspace smoke executable on normal boot
+* provisional `getpid`/`exit`, checked user-copy APIs, and process-level
+  #PF/#GP/#UD containment
+* deterministic QEMU process, isolation, capacity, ELF, user-copy, and fault
+  containment scenarios
 * structured serial diagnostics
 * panic handler
 * an interrupt-enabled idle loop (plus a separate fatal halt path)
@@ -75,23 +88,24 @@ Not implemented:
 
 * APIC initialization
 * keyboard or mouse input
-* general physical-frame deallocation/reuse (heap backing frames stay owned
-  by the heap for the kernel lifetime)
+* general physical-frame deallocation/reuse (heap and process backing frames
+  remain kernel-lifetime owned)
 * dynamic heap growth, per-process heaps, or a slab allocator
 * dynamic task stack growth, task join, blocking, sleep, or priorities
 * APIC, SMP, and multicore scheduling
-* userspace process scheduling, processes, or per-process address spaces
-* `SYSCALL`/`SYSRET`, a process model, or general (non-test) userspace
-  execution
-* ELF userspace loading
-* `copy_from_user`/`copy_to_user` or any user-pointer dereferencing
-* filesystems
-* networking
+* VFS, initrd, filesystem, `/bin/init`, or file descriptors
+* fork, general exec/spawn syscall, dynamic linking, shared libraries, PIE, or
+  relocations
+* userspace thread API, signals, pipes, PTY, shared memory, or general IPC
+* user heap, `brk`, `mmap`, demand paging, copy-on-write, swap, or general
+  physical-frame reclamation
+* APIC/SMP/multicore scheduling, storage, networking, users/groups,
+  capabilities, or GUI/desktop
 * device drivers beyond serial, framebuffer, PIC, and PIT
 
-pvKernel does not claim production readiness, general hardware support,
-process isolation, a stable ABI, or readiness as a reusable kernel or pvOS
-foundation.
+pvKernel's 0.0.9 process and syscall interfaces are experimental. It does not
+claim production readiness, general hardware support, a stable userspace ABI,
+or readiness as a general-purpose kernel.
 
 ## Build
 
@@ -164,9 +178,11 @@ kernel_main
     ├── kernel heap mappings + global allocator
     ├── PIC remap + PIT configuration
     ├── memory-mapping smoke test
+    ├── scheduler and process tables
+    ├── audited address spaces and userspace smoke ELF
     ├── framebuffer
     ├── controlled breakpoint test
-    ├── timer interrupt verification
+    ├── timer interrupt verification and process/task preemption
     └── interrupt-enabled idle loop
 ```
 

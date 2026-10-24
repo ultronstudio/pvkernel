@@ -1,7 +1,8 @@
 # pvKernel 0.0.9 process architecture
 
-**Status:** authoritative 0.0.9 design; implementation in progress. The
-stable-baseline sections describe pvKernel 0.0.8 at
+**Status:** authoritative 0.0.9 design and current implementation model on
+the unmerged implementation branch; 0.0.9 is not released. The stable-
+baseline sections describe pvKernel 0.0.8 at
 `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
@@ -721,43 +722,43 @@ manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
 | frame reclamation | ownership metadata exists although allocator remains monotonic |
 | SMP | explicit per-task ownership helps, but locks/TLB shootdowns/AP bring-up must change |
 
-## 34. Implementation phases
+## 34. Implementation status and remaining phases
 
-1. **A:** ProcessId reservation-generation semantics, checked monotonic PID, lifecycle, bounded table, snapshots.
-2. **B:** mapping inventory/audit, inactive-root AddressSpace construction, kernel mapping clone; fail boot if invariant is unproven.
-3. **C:** per-task kernel stack and checked RSP0 update; user stack layout.
-4. **D:** hostile-input ELF validation, mapping permissions and zeroing.
-5. **E:** TaskKind/process handle, kernel stack top and synthetic CPL3 context (not yet runnable).
-6. **F:** CR3 switch backend and lock-free SwitchPlan handoff; kernel/user root transition tests.
-7. **G:** CPL3 timer preemption for all transition cases.
-8. **H:** non-preemptible ordinary syscall path, getpid and non-returning exit policy, explicit IF-safe exit handoff and deferred Zombie completion.
-9. **I:** checked page-chunk user-copy and negative pointer tests.
-10. **J:** exception scheduler handoff with explicit IF enable after Exiting publication, fault containment, deferred Zombie completion and internal reap.
-11. **K:** accounting and deterministic QEMU scenarios.
-12. **L:** security review of mappings, transitions, locks, ownership and capacity.
-13. **M:** separate implementation PR and review.
-14. **N:** formal pre-release audit.
-15. **O:** RC, published-artifact verification, then stable only after review.
+Implementation phases A through L are present on the 0.0.9 branch: bounded
+identity/lifecycle, audited inactive roots, stack/RSP0 support, checked ELF,
+prepared tasks/publication, CR3 switching, CPL3 PIT preemption, getpid/exit,
+checked user-copy, fault containment/Zombie reaping, accounting/QEMU scenarios,
+and version/docs updates. The remaining project gates are:
 
-Mapping audit precedes CR3 work; exception handoff precedes fault containment.
-These dependencies avoid assuming the difficult part is just loading ELF.
+* **M:** separate implementation PR and human review.
+* **N:** formal pre-release audit against the exact merged main and artifacts.
+* **O:** RC, published-artifact verification, then stable release only after
+  review. No RC or release is part of this implementation branch.
+
+The dependency order remains significant: runtime mapping audit precedes CR3
+activation, and the non-returning exception handoff precedes claims of user
+fault containment.
 
 ## 35. Open questions / blockers
 
-No stable scheduler contradiction blocks this design. These are mandatory
-implementation gates:
+No unresolved correctness blocker is known from the implementation and local
+QEMU review. Keep these constraints visible in future work:
 
-* Runtime mapping audit and upper-half bootloader arena configuration are
-  implemented. Re-run the audit on each boot and after any bootloader/config
-  change; failure to prove all required dependencies upper-half and supervisor
-  blocks CR3 activation.
-* Current paging API mutates only active root. Inactive root construction,
-  physical access and frame ownership must be added before process creation.
-* Current Rust exception handlers are fatal/returning, not scheduler exits.
-  A non-returning user-fault handoff is required before claiming containment.
-* Eight process slots do not imply eight simultaneous processes: the current
-  eight task slots are shared with kernel tasks. Preserve this bound initially
-  and test mixed occupancy.
+* Re-run the dynamic boot-mapping audit whenever bootloader/configuration or
+  required kernel mappings change; process-root activation fails closed if
+  the runtime inventory cannot prove the required supervisor mappings.
+* AddressSpace roots and mappings are torn down from process metadata, but
+  the monotonic physical-frame allocator does not reclaim process backing
+  frames or intermediate table frames. This is an intentional 0.0.9 limit.
+* User-copy safety relies on single-core execution, IF-clear syscalls,
+  immutable Alive mappings, no user remapping, no user threads and no SMP.
+  mmap, concurrent threads or SMP require a stronger pin/locking/fault-safe
+  copy design before they are added.
+* Eight process slots share the existing eight scheduler Task slots with
+  kernel Tasks; process table capacity does not imply eight simultaneously
+  runnable user processes.
+* The embedded static smoke ELF is a temporary provider until VFS/initrd
+  supplies bytes; the loader API remains byte-slice based.
 
-No stable ABI is promised for 0.0.9. Embedded smoke ELF and ABI details need
-implementation review.
+The `int 0x80` process ABI remains experimental. No ABI compatibility promise
+is made before 0.1.0.

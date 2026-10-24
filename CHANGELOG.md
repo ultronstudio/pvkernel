@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.9] - Unreleased
+
+### Added
+
+* Generation-safe `ProcessId` handles distinct from monotonic boot-lifetime
+  PIDs, a bounded process table, checked parent references, and a Creating /
+  Alive / Exiting / Zombie lifecycle with internal reap.
+* Per-process four-level address spaces built from audited upper-half kernel
+  mappings, inactive-root construction, and CR3-aware task switching.
+* Dedicated 32 KiB user stacks with unmapped guards, supervisor-only guarded
+  kernel entry stacks per user Task, and checked TSS.RSP0 updates.
+* True PIT preemption while CPL3 processes run, with a fixed scheduler/task
+  capacity and explicit terminal exit/fault handoffs.
+* A checked static ELF64 little-endian x86_64 `ET_EXEC` loader for `PT_LOAD`
+  segments, with W^X enforcement and zeroed BSS/new user pages.
+* Experimental `getpid` and non-returning `exit` syscalls plus central,
+  page-chunked `copy_from_user`/`copy_to_user` APIs.
+* CPL3 #PF/#GP/#UD containment with scalar fault metadata, deferred Zombie
+  completion after stack handoff, process CPU/page accounting, and a bounded
+  process snapshot API.
+* Embedded static userspace smoke execution on ordinary boots and deterministic
+  QEMU scenarios for process preemption, same-VA isolation, capacity, exit,
+  re-use, ELF validation, user-copy, guard faults, and fault containment.
+
+This remains an experimental single-core userspace foundation. VFS, initrd,
+`/bin/init`, file descriptors, fork/general exec, dynamic linking, signals,
+IPC, user heap/mmap, general physical-frame reclamation, storage, networking,
+SMP and GUI support are not included.
+
 ## [0.0.8] - 2026-10-24
 
 ### Added
