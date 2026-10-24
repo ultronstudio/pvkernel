@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.7] - Unreleased
+
+### Added
+
+* Stateful monotonic physical-frame allocation with a persistent memory-map
+  cursor, removing repeated whole-map frame rescans.
+* A fixed 1 MiB supervisor-only, writable, NX kernel heap mapping with
+  unmapped guard pages and runtime permission verification.
+* A first-fit in-kernel bitmap global allocator with alignment-aware
+  allocation, reusable allocation runs, and adjacent-free-unit coalescing.
+* Rust `alloc` support for `Box`, growing `Vec`, and `String`, with
+  allocation-free deterministic OOM reporting.
+* Deterministic heap success, OOM, and guard-page QEMU scenarios.
+
 All notable changes to pvKernel are described in this file. The format is
 loosely inspired by [Keep a Changelog](https://keepachangelog.com/), without
 claiming strict compliance.

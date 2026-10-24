@@ -102,6 +102,10 @@ jobs:
           - "qemu-test userspace-syscall-test"
           - "qemu-test userspace-privilege-fault-test"
           - "qemu-test userspace-supervisor-fault-test"
+          - heap-test
+          - "qemu-test heap-test"
+          - "qemu-test heap-oom-test"
+          - "qemu-test heap-guard-fault-test"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,3 +228,42 @@ jobs:
             Transitions into CPL3 via iretq, then reads a mapped-but-
             supervisor-only page; the resulting #PF is matched against the
             expected address and error-code bits.
+
+  qemu-kernel-heap:
+    name: QEMU / kernel heap alloc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test heap-test"
+          description: >-
+            Exercises Box, Vec growth, String, alignment, reuse, and
+            fragmentation/coalescing against the fixed kernel heap.
+
+  qemu-kernel-heap-oom:
+    name: QEMU / kernel heap OOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test heap-oom-test"
+          description: >-
+            Requests more than the fixed heap can provide and verifies the
+            allocator reports failure deterministically.
+
+  qemu-kernel-heap-guard:
+    name: QEMU / kernel heap guard page
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: "qemu-test heap-guard-fault-test"
+          description: >-
+            Reads the unmapped supervisor heap guard page and validates the
+            expected non-present page fault.

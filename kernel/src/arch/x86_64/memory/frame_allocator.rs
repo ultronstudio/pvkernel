@@ -14,10 +14,6 @@ use x86_64::{
 
 const FRAME_SIZE: u64 = Size4KiB::SIZE;
 
-const fn align_up(addr: u64, align: u64) -> u64 {
-    (addr + align - 1) & !(align - 1)
-}
-
 const fn align_down(addr: u64, align: u64) -> u64 {
     addr & !(align - 1)
 }
@@ -36,8 +32,47 @@ const fn align_down(addr: u64, align: u64) -> u64 {
 /// pvKernel 0.0.5, but frame reclamation is out of scope for this milestone.
 pub struct BootFrameAllocator {
     regions: &'static [MemoryRegion],
-    next: usize,
+    cursor: FrameCursor,
     allocated: usize,
+}
+
+#[derive(Default)]
+struct FrameCursor {
+    region_index: usize,
+    next_frame_address: u64,
+}
+
+impl FrameCursor {
+    fn next_address(&mut self, regions: &[MemoryRegion]) -> Option<u64> {
+        while self.region_index < regions.len() {
+            let region = &regions[self.region_index];
+            if region.kind != MemoryRegionKind::Usable {
+                self.region_index += 1;
+                self.next_frame_address = 0;
+                continue;
+            }
+            let Some(rounded_start) = region.start.checked_add(FRAME_SIZE - 1) else {
+                self.region_index += 1;
+                self.next_frame_address = 0;
+                continue;
+            };
+            let start = align_down(rounded_start, FRAME_SIZE);
+            let end = align_down(region.end, FRAME_SIZE);
+            let address = self.next_frame_address.max(start);
+            if address < end {
+                let Some(next_address) = address.checked_add(FRAME_SIZE) else {
+                    self.region_index += 1;
+                    self.next_frame_address = 0;
+                    continue;
+                };
+                self.next_frame_address = next_address;
+                return Some(address);
+            }
+            self.region_index += 1;
+            self.next_frame_address = 0;
+        }
+        None
+    }
 }
 
 impl BootFrameAllocator {
@@ -54,35 +89,28 @@ impl BootFrameAllocator {
     pub unsafe fn new(regions: &'static [MemoryRegion]) -> Self {
         Self {
             regions,
-            next: 0,
+            cursor: FrameCursor::default(),
             allocated: 0,
         }
     }
 
-    /// Iterates every allocatable 4 KiB frame in ascending address order.
-    ///
-    /// Region starts are aligned up and region ends are aligned down to the
-    /// frame size, so a partially-aligned usable region never yields a
-    /// frame that spills outside it.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame<Size4KiB>> + '_ {
+    /// Counts allocatable frames. This diagnostic scan is O(number of
+    /// regions) and is never used by the allocation hot path.
+    pub fn usable_frame_count(&self) -> usize {
         self.regions
             .iter()
             .filter(|region| region.kind == MemoryRegionKind::Usable)
-            .flat_map(|region| {
-                let start = align_up(region.start, FRAME_SIZE);
+            .map(|region| {
+                let Some(start) = region.start.checked_add(FRAME_SIZE - 1) else {
+                    return 0;
+                };
+                let start = align_down(start, FRAME_SIZE);
                 let end = align_down(region.end, FRAME_SIZE);
-                let frame_count = end.saturating_sub(start) / FRAME_SIZE;
-                (0..frame_count).map(move |i| {
-                    PhysFrame::containing_address(PhysAddr::new(start + i * FRAME_SIZE))
-                })
+                end.saturating_sub(start) / FRAME_SIZE
             })
-    }
-
-    /// Total number of 4 KiB frames this allocator could ever hand out,
-    /// including ones already allocated. Recomputed from the memory map on
-    /// every call; intended for occasional boot diagnostics, not a hot path.
-    pub fn usable_frame_count(&self) -> usize {
-        self.usable_frames().count()
+            .fold(0_u64, u64::saturating_add)
+            .try_into()
+            .unwrap_or(usize::MAX)
     }
 
     /// Number of frames handed out so far.
@@ -91,18 +119,51 @@ impl BootFrameAllocator {
     }
 }
 
-// SAFETY: `allocate_frame` only ever returns a frame at the current `next`
-// index and then advances `next`, so no frame is ever returned twice by this
+// SAFETY: `allocate_frame` advances a persistent region/address cursor, so no
+// frame is ever returned twice by this
 // allocator; combined with the safety invariant on `new` (the region list is
 // the real usable memory map), this satisfies `FrameAllocator`'s contract
 // that returned frames are unique and unused.
 unsafe impl FrameAllocator<Size4KiB> for BootFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        let frame = self.usable_frames().nth(self.next);
-        if frame.is_some() {
-            self.next += 1;
-            self.allocated += 1;
-        }
-        frame
+        let address = self.cursor.next_address(self.regions)?;
+        self.allocated = self.allocated.saturating_add(1);
+        Some(PhysFrame::containing_address(PhysAddr::new(address)))
     }
+}
+
+#[cfg(feature = "qemu-test")]
+pub fn run_cursor_regression_test() {
+    static REGIONS: [MemoryRegion; 5] = [
+        MemoryRegion {
+            start: 0x1003,
+            end: 0x3001,
+            kind: MemoryRegionKind::Usable,
+        },
+        MemoryRegion {
+            start: 0x4000,
+            end: 0x8000,
+            kind: MemoryRegionKind::Bootloader,
+        },
+        MemoryRegion {
+            start: 0x9000,
+            end: 0xB000,
+            kind: MemoryRegionKind::Usable,
+        },
+        MemoryRegion {
+            start: 0xC001,
+            end: 0xCFFF,
+            kind: MemoryRegionKind::Usable,
+        },
+        MemoryRegion {
+            start: u64::MAX - 3,
+            end: u64::MAX,
+            kind: MemoryRegionKind::Usable,
+        },
+    ];
+    let mut cursor = FrameCursor::default();
+    let frames: [u64; 3] = core::array::from_fn(|_| cursor.next_address(&REGIONS).unwrap());
+    assert_eq!(frames, [0x2000, 0x9000, 0xA000]);
+    assert_eq!(cursor.next_address(&REGIONS), None);
+    crate::kprintln!("[memory-test] stateful frame cursor regression passed");
 }

@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.6` — Userspace Entry and Syscall Foundation
+Version: `0.0.7` — Kernel Heap and Rust `alloc`
 
 Implemented:
 
@@ -52,6 +52,13 @@ Implemented:
 * four deterministic, headless QEMU tests for the syscall boundary,
   supervisor write protection, an expected CPL3 privilege-instruction
   fault, and an expected CPL3 supervisor-page fault
+* stateful monotonic physical-frame allocation
+* a fixed 1 MiB supervisor-only, writable, NX kernel heap with unmapped
+  guard pages
+* a global first-fit bitmap allocator with alignment-aware reuse and
+  coalescing of adjacent free allocation units
+* Rust `alloc` support for `Box`, growing `Vec`, and `String`
+* deterministic heap success, OOM, and guard-page QEMU tests
 * structured serial diagnostics
 * panic handler
 * an interrupt-enabled idle loop (plus a separate fatal halt path)
@@ -60,10 +67,10 @@ Not implemented:
 
 * APIC initialization
 * keyboard or mouse input
-* frame deallocation/reuse (the physical frame allocator is monotonic only)
-* kernel heap or dynamic allocation
-* guard pages (other than the fixed, unmapped guard page used by the
-  userspace test scenarios)
+* general physical-frame deallocation/reuse (heap backing frames stay owned
+  by the heap for the kernel lifetime)
+* dynamic heap growth, per-process heaps, or a slab allocator
+* guard pages for stacks or other subsystems (the kernel heap has two)
 * processes, threads, or a scheduler
 * `SYSCALL`/`SYSRET`, a process model, or general (non-test) userspace
   execution
@@ -145,6 +152,7 @@ kernel_main
     ├── boot memory map
     ├── x86_64 GDT, TSS and IDT
     ├── physical frame allocator + active page table
+    ├── kernel heap mappings + global allocator
     ├── PIC remap + PIT configuration
     ├── memory-mapping smoke test
     ├── framebuffer

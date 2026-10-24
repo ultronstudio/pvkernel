@@ -135,3 +135,22 @@ tests.
 combined with `qemu-test`; the `qemu-tests` job builds and runs the headless
 `qemu-test mem-fault-tests` command above on every pull request and push to
 `main`, alongside the existing timer and page-fault tests.
+
+## Kernel heap tests (pvKernel 0.0.7)
+
+The allocator is initialized only after all 256 fixed heap pages are mapped
+and the first, middle, last, and guard-page translations are verified. Boot
+then exercises `Box`, capacity-growing `Vec`, `String`, alignments from 1
+through 4096 bytes, freeing/reuse, and fragmentation with coalescing. CI
+runs these success checks and two isolated scenarios:
+
+```bash
+cargo run --features "qemu-test heap-test" -- --headless-test
+cargo run --features "qemu-test heap-oom-test" -- --headless-test
+cargo run --features "qemu-test heap-guard-fault-test" -- --headless-test
+```
+
+The OOM case asks the allocator directly for more than twice the heap size
+and expects null, without allocating from its failure path. The guard case
+accesses the lower supervisor guard page and accepts only a not-present,
+supervisor, read page fault at that exact address.

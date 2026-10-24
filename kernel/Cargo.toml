@@ -55,6 +55,12 @@ userspace-privilege-fault-test = ["userspace-test"]
 # kernel page, expecting a #PF fault with the USER_MODE bit set, then
 # exits. See docs/development/userspace-testing.md.
 userspace-supervisor-fault-test = ["userspace-test"]
+# Runs deterministic alloc-backed heap success coverage on boot.
+heap-test = []
+# Requests an oversized allocation and expects a null result (QEMU test only).
+heap-oom-test = ["heap-test"]
+# Reads the unmapped heap guard page and expects a supervisor #PF (QEMU only).
+heap-guard-fault-test = ["heap-test"]
 
 [dependencies]
 bootloader_api = "=0.11.17"

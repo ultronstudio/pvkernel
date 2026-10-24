@@ -32,6 +32,11 @@ itself. These remain future roadmap items; see [ROADMAP.md](../../ROADMAP.md).
 > [docs/architecture/syscalls.md](syscalls.md). The rest of this document
 > otherwise still describes the 0.0.5 memory foundation accurately.
 
+> **0.0.7 update:** the historical sections below describe the memory
+> foundation as introduced in 0.0.5. The fixed kernel heap, global
+> allocator, and their layout/security invariants are documented in the
+> [0.0.7 heap section](#kernel-heap-pvkernel-007) near the end of this file.
+
 ## Canonical addresses and paging mode
 
 x86_64 requires virtual addresses to be in canonical form: bits 63:47 must
@@ -108,10 +113,11 @@ addresses.
 ## Physical frame allocator (`frame_allocator::BootFrameAllocator`)
 
 `BootFrameAllocator` is a monotonic allocator built once from the
-bootloader's `MemoryRegions`: it filters regions of kind
-`MemoryRegionKind::Usable`, aligns each region's usable range to 4 KiB frame
-boundaries, and hands out frames from that iterator in order via
-`FrameAllocator<Size4KiB>::allocate_frame`.
+bootloader's `MemoryRegions`: it skips non-usable regions, aligns starts up
+and ends down to 4 KiB boundaries, and keeps a region index plus next-frame
+address. Allocation advances this cursor without rebuilding or rescanning a
+frame iterator. The total frame count remains an occasional O(number of
+regions) diagnostic scan.
 
 **Limitations, by design in this milestone:**
 
@@ -119,13 +125,12 @@ boundaries, and hands out frames from that iterator in order via
   frame to the caller, but nothing hands it back to the allocator;
 * only 4 KiB frames are allocated; pvKernel never creates 2 MiB/1 GiB huge
   pages itself;
-* allocation is `O(n)` in the number of already-allocated frames (`Iterator::nth`
-  re-walks the usable-region iterator each call) — acceptable for boot-time
-  and test-scale allocation counts in this milestone, not tuned for a
-  general-purpose allocator workload.
+* allocation is monotonic and does not reclaim frames; its total traversal
+  cost is O(number of memory regions + number of allocated frames), rather
+  than repeatedly rescanning all prior frames.
 
-A real deallocating/reusable allocator (e.g. a free-list or bitmap
-allocator) is future work, likely alongside kernel heap support.
+Heap object memory reuse is provided by the separate kernel heap allocator;
+that does not return its backing frames to this allocator.
 
 ## Active page-table access (`address_space::KernelAddressSpace`)
 
@@ -322,12 +327,60 @@ See [docs/development/memory-testing.md](../development/memory-testing.md)
 for what the boot-time smoke test and the optional post-unmap page-fault
 test verify, and how to run them.
 
+## Kernel heap (pvKernel 0.0.7)
+
+The kernel reserves this fixed canonical virtual range:
+
+```text
+0xffff90000ffff000  lower unmapped guard page
+0xffff900010000000  HEAP_START
+                    1 MiB heap (256 x 4 KiB pages)
+0xffff900010100000  HEAP_END / upper unmapped guard page
+```
+
+The range is separate from the temporary mapping probe at
+`0xffff900000000000` and the low userspace test range. At boot, every heap
+and guard page is checked as unmapped before mapping. A collision or mapping
+failure is fatal; allocator initialization does not proceed with a partial
+heap. The virtual range is checked for canonicality, page alignment, and
+arithmetic overflow.
+
+Heap pages use `PRESENT | WRITABLE | NO_EXECUTE`, with
+`USER_ACCESSIBLE` clear. This depends on the existing validated 4-level
+paging mode, `EFER.NXE`, `CR0.WP`, and W^X mapping policy. Both adjacent guard
+pages remain unmapped. Representative first, middle, and last pages and both
+guards are checked before the global allocator becomes available.
+
+Initialization order is: disable interrupts; initialize GDT/TSS and IDT;
+validate paging prerequisites; initialize the stateful frame allocator and
+active page table; map and verify the heap; initialize its global allocator;
+then proceed with PIC/PIT and later boot tests. Allocations before allocator
+initialization return null and flow to the deterministic OOM handler.
+
+The allocator is a repository-owned first-fit bitmap. Its static occupancy
+bitmap tracks 16-byte heap units, and a second bitmap records allocation
+starts. It aligns requested addresses and marks the required units; freeing
+clears those bits, so adjacent free units are immediately reusable as a larger
+run. The static metadata avoids raw pointer dereferences and does not
+recursively allocate from the heap. A 1 MiB heap uses 16 KiB of bitmap state.
+A spin mutex protects the bitmaps; each allocator critical section disables
+maskable interrupts to avoid same-CPU IRQ reentrancy and
+deadlock. The kernel is still single-CPU, so SMP synchronization is not
+claimed. OOM reports size and alignment using allocation-free serial
+formatting and halts (or exits as failure in QEMU test mode).
+
+Physical backing frames allocated for heap pages transfer to the heap and
+remain owned by it for the kernel lifetime. `Box`, `Vec`, and `String`
+deallocation returns space to the heap allocator; it does not return frames
+to the monotonic physical frame allocator. Heap mapping failures after frame
+allocation are fatal and do not attempt unsafe rollback.
+
 ## Future work and known limitations
 
-* No frame deallocation/reuse — `BootFrameAllocator` is monotonic only.
-* No kernel heap or Rust `alloc` support (now planned for 0.0.7; see
-  [ROADMAP.md](../../ROADMAP.md)).
-* No guard pages (nothing yet needs a growable, guarded region).
+* No general physical-frame deallocation/reuse — heap backing frames remain
+  owned for kernel lifetime.
+* The heap is fixed-size (1 MiB); there is no dynamic heap growth, per-process
+  heap, or slab allocator.
 * No SMP-aware locking beyond `without_interrupts` + `spin::Mutex` (correct
   for a single CPU; would need revisiting for multi-core support).
 * No huge-page creation, and no support for unmapping/remapping a range

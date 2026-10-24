@@ -9,7 +9,7 @@ members = ["kernel"]
 # docs/security/vulnerability-management.md and the release workflows for
 # why that consistency matters at release time.
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 repository = "https://github.com/ultronstudio/pvkernel"
@@ -50,6 +50,10 @@ userspace-privilege-fault-test = ["kernel/userspace-privilege-fault-test"]
 # Forwards to the kernel's userspace supervisor-page-fault test; see
 # docs/development/userspace-testing.md.
 userspace-supervisor-fault-test = ["kernel/userspace-supervisor-fault-test"]
+# Forwards deterministic heap allocator tests to the kernel.
+heap-test = ["kernel/heap-test"]
+heap-oom-test = ["kernel/heap-oom-test"]
+heap-guard-fault-test = ["kernel/heap-guard-fault-test"]
 
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
