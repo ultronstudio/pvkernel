@@ -40,6 +40,19 @@ impl HeapAllocator {
         }
     }
 
+    /// Checks a free-list node's address before any pointer dereference.
+    fn valid_node_address(&self, node: *const ListNode) -> bool {
+        if !self.initialized || node.is_null() {
+            return false;
+        }
+        let address = node as usize;
+        address >= self.start
+            && address.is_multiple_of(NODE_ALIGN)
+            && address
+                .checked_add(NODE_SIZE)
+                .is_some_and(|node_end| node_end <= self.end)
+    }
+
     /// Initializes one free region without allocating metadata.
     ///
     /// # Safety
@@ -84,8 +97,12 @@ impl HeapAllocator {
         let mut current = self.head;
 
         while !current.is_null() {
+            if !self.valid_node_address(current) {
+                return null_mut();
+            }
             // SAFETY: every list node is created only inside the heap from a
-            // free region, and list links are protected by the allocator lock.
+            // free region; `valid_node_address` checks its alignment and
+            // complete metadata extent, and the lock protects list links.
             let node = unsafe { &mut *current };
             let block_start = current as usize;
             let Some(aligned_start) = align_up(block_start, layout.align()) else {
@@ -102,6 +119,9 @@ impl HeapAllocator {
             let Some(block_end) = block_start.checked_add(node.size) else {
                 return null_mut();
             };
+            if node.size < NODE_SIZE || block_end > self.end {
+                return null_mut();
+            }
             if aligned_start < block_start
                 || allocation_end > block_end
                 || (prefix != 0 && prefix < NODE_SIZE)
@@ -118,6 +138,9 @@ impl HeapAllocator {
             }
 
             let next = node.next;
+            if !next.is_null() && !self.valid_node_address(next) {
+                return null_mut();
+            }
             let replacement = if suffix >= NODE_SIZE {
                 let suffix_node = allocation_end as *mut ListNode;
                 // SAFETY: the suffix is inside the original free node, has
@@ -143,7 +166,11 @@ impl HeapAllocator {
                 self.head = replacement;
             } else {
                 // SAFETY: `previous` is a valid free-list node, as established
-                // by the traversal, and the lock prevents concurrent edits.
+                // by the traversal and rechecked here; the lock prevents
+                // concurrent edits.
+                if !self.valid_node_address(previous) {
+                    return null_mut();
+                }
                 unsafe { (*previous).next = replacement };
             }
             return aligned_start as *mut u8;
@@ -176,9 +203,18 @@ impl HeapAllocator {
         let mut previous: *mut ListNode = null_mut();
         let mut next = self.head;
         while !next.is_null() && (next as usize) < start {
+            if !self.valid_node_address(next) {
+                return false;
+            }
             previous = next;
-            // SAFETY: `next` is a node reached through the valid locked list.
+            // SAFETY: `valid_node_address` verifies `next` is aligned and its
+            // complete metadata region is inside this mapped heap.
             next = unsafe { (*next).next };
+        }
+        if (!previous.is_null() && !self.valid_node_address(previous))
+            || (!next.is_null() && !self.valid_node_address(next))
+        {
+            return false;
         }
 
         let previous_end = if previous.is_null() {
@@ -202,19 +238,43 @@ impl HeapAllocator {
             // SAFETY: `previous` is the adjacent free region and metadata is
             // valid under the list invariants.
             merged_start = previous as usize;
-            merged_size = unsafe { (*previous).size } + size;
+            let Some(coalesced_size) = (unsafe { (*previous).size }).checked_add(size) else {
+                return false;
+            };
+            merged_size = coalesced_size;
             successor = unsafe { (*previous).next };
         }
         if !successor.is_null() && merged_start.checked_add(merged_size) == Some(successor as usize)
         {
             // SAFETY: `successor` is the adjacent next free region.
-            merged_size += unsafe { (*successor).size };
+            let successor_size = unsafe { (*successor).size };
+            let Some(successor_end) = (successor as usize).checked_add(successor_size) else {
+                return false;
+            };
+            if successor_end > self.end || successor_size < NODE_SIZE {
+                return false;
+            }
+            let Some(coalesced_size) = merged_size.checked_add(successor_size) else {
+                return false;
+            };
+            merged_size = coalesced_size;
             successor = unsafe { (*successor).next };
         }
 
         let merged = merged_start as *mut ListNode;
+        let Some(merged_end) = merged_start.checked_add(merged_size) else {
+            return false;
+        };
+        if merged_start < self.start
+            || merged_end > self.end
+            || !merged_start.is_multiple_of(NODE_ALIGN)
+            || merged_size < NODE_SIZE
+        {
+            return false;
+        }
         // SAFETY: the freed region and any coalesced adjacent free regions
-        // form a valid mapped, aligned region large enough for a node.
+        // form a valid mapped, aligned region large enough for a node, as
+        // checked above.
         unsafe {
             ptr::write(
                 merged,
@@ -227,7 +287,11 @@ impl HeapAllocator {
         if previous.is_null() {
             self.head = merged;
         } else if merged != previous {
-            // SAFETY: previous remains a valid earlier list node.
+            // SAFETY: `previous` was reached from the list and revalidated
+            // above before any list mutation.
+            if !self.valid_node_address(previous) {
+                return false;
+            }
             unsafe { (*previous).next = merged };
         }
         true
