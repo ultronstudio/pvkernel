@@ -43,7 +43,8 @@ below).
 ## Tick counter
 
 `pit::TICKS` is an `AtomicU64` incremented by exactly one
-(`Ordering::Relaxed`) each time `timer_interrupt_handler` (vector 32, IRQ0)
+(`Ordering::Relaxed`) each time the dedicated assembly IRQ0 entry
+(`arch::x86_64::task::timer_irq_entry`, vector 32)
 runs, via `pit::record_tick()`. `Relaxed` ordering is sufficient because the
 counter is only ever read as a plain numeric observation (has at least N
 ticks elapsed?); it is not used to publish or synchronize any other memory
@@ -66,9 +67,8 @@ the call never returns.
 
 ## Enabling the timer interrupt
 
-`kernel_main` performs a controlled, boot-time verification that timer
-interrupts are actually being delivered, after the breakpoint test and
-before the optional page-fault test:
+`kernel_main` prepares finite scheduler smoke tasks before unmasking IRQ0,
+then verifies that timer interrupts are being delivered:
 
 1. record `ticks_before`;
 2. `pic::unmask(IrqLine::Timer)` — enables IRQ0 specifically, leaving all
@@ -76,8 +76,10 @@ before the optional page-fault test:
 3. `x86_64::instructions::interrupts::enable()` — sets the CPU's maskable
    interrupt flag, the first point at which any hardware interrupt can
    actually reach the CPU in pvKernel's boot flow;
-4. `pit::wait_for_ticks(TIMER_TEST_TICKS)` (5 ticks);
-5. record `ticks_after` and log the observed tick advance and approximate
+4. restore IF; timer preemption can now occur only at IRQ0 return;
+5. `pit::wait_for_ticks(TIMER_TEST_TICKS)` (5 ticks), during which both
+   smoke tasks run and return to bootstrap;
+6. record `ticks_after` and log the observed tick advance and approximate
    uptime.
 
 This ordering (unmask, then enable) matters: unmasking first with

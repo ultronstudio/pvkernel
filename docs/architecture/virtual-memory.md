@@ -375,6 +375,30 @@ deallocation returns space to the heap allocator; it does not return frames
 to the monotonic physical frame allocator. Heap mapping failures after frame
 allocation are fatal and do not attempt unsafe rollback.
 
+## Kernel task stacks (pvKernel 0.0.8)
+
+The scheduler reserves eight fixed stack slots beginning at
+`0xffff900020000000`. Each slot occupies 24 KiB of virtual address space:
+one lower unmapped guard page, four mapped pages (16 KiB stack), and one
+upper unmapped guard page. The full region ends at
+`0xffff900020030000`. Initialization checks the entire range for existing
+mappings before mapping any stack and validates canonicality and checked
+arithmetic.
+
+Every stack page is present, writable, supervisor-only, and NX. Both guard
+pages stay unmapped. The subsystem verifies actual translations for each
+slot's first, middle, and last stack pages and both guards after mapping.
+The high mapped address is the exclusive initial stack top; x86_64 stacks
+grow downward toward the lower guard.
+
+The stack subsystem pre-maps all slots before scheduler activation. Physical
+frames remain owned by the task-stack subsystem for kernel lifetime. A task
+slot may reuse its existing virtual mapping/backing only after an IRQ context
+switch has stopped executing on the previous task's stack. No stack backing
+frame is returned to the monotonic boot frame allocator. See
+[docs/architecture/kernel-tasks.md](kernel-tasks.md) for context, lifecycle,
+and preemption details.
+
 ## Future work and known limitations
 
 * No general physical-frame deallocation/reuse — heap backing frames remain

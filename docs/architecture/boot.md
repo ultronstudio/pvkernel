@@ -33,13 +33,18 @@ crate; it is not part of pvKernel.
     `P` logo (`kernel/src/graphics/framebuffer.rs`).
 13. pvKernel verifies breakpoint handling with a controlled `int3` call and
     confirms execution resumes afterward.
-14. pvKernel unmasks PIT IRQ0, enables maskable hardware interrupts, and
-    confirms the tick counter advances by at least 5 ticks (see
-    [docs/architecture/timer.md](timer.md)).
-15. If the `fault-tests` Cargo feature is enabled, pvKernel triggers a
+14. Before enabling IRQ0, pvKernel initializes the bounded kernel scheduler,
+    pre-maps and verifies its guarded task stacks, and prepares two finite
+    kernel-task smoke entries.
+15. pvKernel unmasks PIT IRQ0, enables maskable hardware interrupts, runs the
+    two tasks under timer preemption, confirms bootstrap resumes after task
+    exit, and verifies the tick counter advances (see
+    [docs/architecture/timer.md](timer.md) and
+    [docs/architecture/kernel-tasks.md](kernel-tasks.md)).
+16. If the `fault-tests` Cargo feature is enabled, pvKernel triggers a
     deliberate page fault and matches it against its expected faulting
     address.
-16. pvKernel enters an interrupt-enabled idle loop
+17. pvKernel enters an interrupt-enabled idle loop
     (`kernel/src/halt.rs::idle_loop`), unless the `qemu-test` Cargo feature
     is enabled, in which case it exits QEMU deterministically instead (see
     [docs/development/testing.md](../development/testing.md)).
@@ -51,10 +56,11 @@ crate; it is not part of pvKernel.
   management is a future milestone (see [ROADMAP.md](../../ROADMAP.md)).
 * Steps 10-11 (PIC/PIT setup) happen before the framebuffer is initialized,
   but every IRQ line stays masked and maskable interrupts stay disabled
-  until step 14, so no hardware interrupt can be delivered before the IDT,
+  until step 15, so no hardware interrupt can be delivered before the IDT,
   PIC, and PIT are all fully configured.
 * The boot flow above matches `cargo run`. `cargo run --features
-  fault-tests` performs one additional step after the timer verification: a
+  fault-tests` performs one additional step after the scheduler/timer
+  verification: a
   deliberate page fault, described in
   [docs/development/debugging.md](../development/debugging.md).
 * `cargo run --features qemu-test -- --headless-test` (optionally combined

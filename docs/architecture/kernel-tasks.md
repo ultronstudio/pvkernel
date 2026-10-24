@@ -18,11 +18,14 @@ The implementation baseline is the stable v0.0.7 commit
   hardware clears IF. Thus maskable IRQ nesting is already disabled in the
   handler. The handler itself does not enable IF, allocate, log, format, or
   lock. A replacement scheduler entry must retain these properties.
-* A same-CPL (CPL0) hardware interrupt pushes `RIP`, `CS`, `RFLAGS` on the
-  current stack. A CPL3-to-CPL0 interrupt instead switches to TSS.RSP0 and
-  also pushes the interrupted `RSP` and `SS`. The IDT Rust interrupt ABI
-  represents this with `InterruptStackFrame`; it is not a uniform stack
-  layout suitable for blindly switching from that handler.
+* The long-mode interrupt frame observed by the existing
+  `InterruptStackFrame` path and confirmed by QEMU's synthetic-context probe
+  includes `RIP`, `CS`, `RFLAGS`, `RSP`, and `SS`. A CPL3-to-CPL0 interrupt
+  additionally switches to TSS.RSP0, while same-CPL interrupts use the
+  current stack. QEMU confirmed `iretq` consumes the RSP/SS words for a
+  synthetic CPL0 return: omitting them faults at the stack top. A dedicated
+  entry still owns the saved context explicitly and avoids the Rust
+  handler's compiler-managed frame.
 * CPL3 payloads run with PIT IRQ0 enabled. The syscall test observes a tick
   that interrupted CPL3 via a relaxed atomic set by the timer handler. A
   kernel scheduler must therefore inspect saved `CS.RPL` and skip scheduling
@@ -56,8 +59,8 @@ The implementation baseline is the stable v0.0.7 commit
 
 These findings rule out switching by returning from the current
 `extern "x86-interrupt"` Rust handler: its compiler-managed frame and the
-CPL0/CPL3 hardware-frame difference make an arbitrary stack swap there
-unsafe. The scheduler design uses a dedicated IRQ0 assembly entry that saves
+different stack source for CPL0/CPL3 hardware frames make an arbitrary stack
+swap there unsafe. The scheduler design uses a dedicated IRQ0 assembly entry that saves
 the machine state in one documented format, calls a small Rust policy
 function with an ABI-aligned stack, and restores the selected frame with
 `iretq`. Other exception and IRQ handlers remain unchanged.
@@ -74,9 +77,10 @@ error.
 The task table and ready queue are fixed-size arrays with capacity
 `MAX_KERNEL_TASKS = 8`. Eight tasks are sufficient for the scheduler tests
 and early kernel tasks while keeping static metadata and pre-mapped stack
-memory bounded. The TCB conceptually stores ID, lifecycle state, saved
-context pointer, stack slot, queue-membership flag, and kernel entry pointer.
-No scheduler metadata operation allocates.
+memory bounded. The TCB stores ID, lifecycle state, saved context pointer,
+stack slot, and queue-membership flag. The initial entry pointer lives in
+the synthetic RDI register until the assembly trampoline consumes it. No
+scheduler metadata operation allocates.
 
 States are `Vacant`, `Ready`, `Running`, `Exiting`, `Exited`, and `Retired`.
 Exactly one ordinary task can be `Running`; the bootstrap context is a
@@ -108,7 +112,9 @@ mapping.
 All stack slots are pre-mapped during scheduler initialization, before IRQ0
 can schedule tasks. Their physical frames transfer to the task-stack
 subsystem and remain owned for kernel lifetime; slot reuse reuses those same
-backing pages. No frames are returned to the monotonic boot allocator.
+backing pages. Reusing a slot first clears its mapped stack bytes before the
+new task context is published. No frames are returned to the monotonic boot
+allocator.
 
 ## Context frame and switch boundary
 
@@ -124,17 +130,19 @@ low addresses / saved RSP
   RIP
   CS
   RFLAGS
-  old RSP       (only when hardware interrupted CPL3)
-  old SS        (only when hardware interrupted CPL3)
+  RSP
+  SS
 high addresses
 ```
 
 The precise push order and offsets in the assembly implementation are the
 source of truth and must match named constants / compile-time layout checks.
-For the scheduler-managed path, saved `CS.RPL` must be zero, so the selected
-frame returns with the three-word CPL0 `iretq` frame. CPL3-origin IRQs use
-the existing no-switch return path and their five-word hardware frame is
-preserved untouched. No CPL3 frame is interpreted as a kernel task context.
+In the inspected long-mode configuration `iretq` consumes all five hardware
+frame words for CPL0 and CPL3 returns. CPL3-origin IRQs use the existing
+no-switch return path and their frame is preserved untouched. No CPL3 frame
+is interpreted as a kernel task context. Synthetic CPL0 contexts include
+explicit RSP and the kernel's null SS value; initial RSP points at the
+aligned stack top.
 
 Before calling Rust, assembly retains the interrupted saved-context pointer,
 aligns a temporary call stack to the SysV x86_64 16-byte ABI, and calls only
@@ -142,22 +150,27 @@ the allocation-free scheduler decision function. The Rust call returns the
 selected context pointer. The lock has been released before assembly adopts
 that pointer. IRQ0 EOI is sent exactly once after tick recording and the
 scheduler decision, before restoring the selected context. IF remains clear
-until `iretq` restores the selected task's flags.
+until `iretq` restores the selected task's flags. Assembly executes `cld`
+before calling Rust to satisfy the ABI direction-flag invariant; `iretq`
+restores the interrupted task's original DF value from RFLAGS.
 
 Initial task contexts contain defined zero values for all GPRs, the kernel
 code selector, a deliberate safe RFLAGS image, and the task-entry assembly
-trampoline as RIP. The trampoline calls the trusted `fn()` entry pointer
-stored in scheduler metadata, with correct ABI stack alignment. If the entry
-returns, it calls the non-returning task-exit path; it never returns into a
-fabricated or uninitialized address.
+trampoline as RIP, the trusted `fn()` entry pointer in RDI, the aligned stack
+top in RSP, and the kernel's null SS value. The trampoline makes the Rust
+call with correct ABI stack alignment. If the entry returns, it calls the
+non-returning task-exit path; it never returns into a fabricated or
+uninitialized address.
 
 The task stack uses `iretq` to enter the trampoline. The trampoline then
 establishes ordinary Rust call alignment explicitly. Task code returning
 marks its task `Exiting` with interrupts masked and waits for the next PIT
 IRQ to switch away. Only after the IRQ has saved the exiting frame and
 selected another context is that task marked `Exited`, proving no instruction
-continues on its stack. Bootstrap/idle reaps Exited slots and permits reuse.
-No task can reuse its own active stack.
+continues on its stack. The IRQ gate keeps IF clear through the assembly
+restore, so no ordinary spawn API can run between marking Exited and leaving
+that stack. A later spawn can reuse the Exited slot and stack; no task can
+reuse its own active stack.
 
 ## Queue and scheduling policy
 

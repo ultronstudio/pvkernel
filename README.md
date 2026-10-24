@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.7` — Kernel Heap and Rust `alloc`
+Version: `0.0.8` — Scheduler + Kernel Tasks
 
 Implemented:
 
@@ -59,6 +59,14 @@ Implemented:
   coalescing of adjacent free allocation units
 * Rust `alloc` support for `Box`, growing `Vec`, and `String`
 * deterministic heap success, OOM, and guard-page QEMU tests
+* bounded single-core preemptive round-robin scheduling for ring-0 kernel
+  tasks, with generation-aware IDs and deterministic task lifecycle
+* eight centrally reserved 16 KiB kernel task stacks, supervisor-only RW/NX,
+  with unmapped guard pages above and below
+* dedicated timer IRQ context switching with complete general-purpose
+  register and interrupt-frame preservation; CPL3 timer IRQs resume in place
+* deterministic QEMU scheduler, CPU-bound preemption, stack-guard, capacity,
+  and stale-ID/reuse coverage
 * structured serial diagnostics
 * panic handler
 * an interrupt-enabled idle loop (plus a separate fatal halt path)
@@ -70,8 +78,9 @@ Not implemented:
 * general physical-frame deallocation/reuse (heap backing frames stay owned
   by the heap for the kernel lifetime)
 * dynamic heap growth, per-process heaps, or a slab allocator
-* guard pages for stacks or other subsystems (the kernel heap has two)
-* processes, threads, or a scheduler
+* dynamic task stack growth, task join, blocking, sleep, or priorities
+* APIC, SMP, and multicore scheduling
+* userspace process scheduling, processes, or per-process address spaces
 * `SYSCALL`/`SYSRET`, a process model, or general (non-test) userspace
   execution
 * ELF userspace loading

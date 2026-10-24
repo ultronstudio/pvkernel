@@ -23,15 +23,17 @@ status byte to QEMU's `isa-debug-exit` I/O port (`0xF4`) and never return
 (falling back to `halt::halt_forever` if QEMU somehow does not exit). With
 `qemu-test` enabled:
 
-* `kernel_main` calls `qemu::exit_success()` once the boot-time timer
-  verification (see [docs/architecture/timer.md](../architecture/timer.md))
-  and, if `fault-tests` is also enabled, the expected page-fault check
-  complete successfully, instead of entering the normal idle loop.
+* `kernel_main` calls `qemu::exit_success()` once task smoke, boot-time timer
+  verification (see [docs/architecture/timer.md](../architecture/timer.md)),
+  and any selected finite scheduler scenario complete, instead of entering
+  the normal idle loop. Expected-fault scenarios exit from their matching
+  handler after validating the fault.
 * the panic handler calls `qemu::exit_failure()` instead of
   `halt::halt_forever()`.
-* `interrupts::page_fault_handler` recognizes a deliberately triggered fault
-  (address and in-flight flag set by `run_page_fault_test`) and calls
-  `qemu::exit_success()` directly, instead of treating it as fatal.
+* `interrupts::page_fault_handler` recognizes deliberately armed expected
+  faults, including the kernel-task stack guard scenario, and calls
+  `qemu::exit_success()` directly instead of treating a matching fault as
+  fatal.
 
 Without `qemu-test`, none of this code is compiled in at all — a plain
 `cargo build`/`cargo run` never links against the isa-debug-exit port.
@@ -76,6 +78,18 @@ timeout 60 cargo run --features qemu-test -- --headless-test
 # Same as above, plus a deliberate page fault matched against its expected
 # faulting address, exercised after the timer test.
 timeout 60 cargo run --features "qemu-test fault-tests" -- --headless-test
+
+# Two finite kernel tasks, guarded stacks, exit, and bootstrap resume.
+timeout 60 cargo run --features "qemu-test scheduler-test" -- --headless-test
+
+# Two CPU-bound tasks that can finish only after IRQ-driven preemption.
+timeout 60 cargo run --features scheduler-preemption-test -- --headless-test
+
+# Expected task stack lower-guard page fault.
+timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
+
+# Fixed task capacity, safe stack-slot reuse, and stale TaskId rejection.
+timeout 60 cargo run --features "qemu-test task-capacity-test" -- --headless-test
 ```
 
 Both commands should print the full boot log to standard output and exit
@@ -91,6 +105,9 @@ See [docs/development/memory-testing.md](memory-testing.md) for the
 0.0.6 userspace boundary tests (`userspace-syscall-test`,
 `userspace-privilege-fault-test`, `userspace-supervisor-fault-test`), which
 build on this same mechanism.
+
+The timer IRQ context-switch boundary and kernel-task limitations are
+documented in [docs/architecture/kernel-tasks.md](../architecture/kernel-tasks.md).
 
 ## CI integration
 

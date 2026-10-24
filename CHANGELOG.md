@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.8] - Unreleased
+
+### Added
+
+* Bounded ring-0 kernel tasks with generation-aware `TaskId`s, eight
+  pre-mapped 16 KiB supervisor RW/NX stacks, and unmapped guards on both
+  ends.
+* A dedicated x86_64 PIT IRQ entry that saves the complete GPR and long-mode
+  interrupt frame, preserves CPL3 returns without scheduling, and performs
+  allocation-free round-robin decisions.
+* A bounded ready ring, safe task-return/exit lifecycle, and deterministic
+  QEMU coverage for task execution, timer preemption, capacity/reuse, stale
+  IDs, and task stack guard faults.
+
 ## [0.0.7] - Unreleased
 
 ### Added

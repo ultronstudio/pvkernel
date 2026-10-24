@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.7. It does not describe planned or aspirational architecture; see
+version 0.0.8. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
@@ -29,6 +29,11 @@ pvKernel ELF (kernel_main)
 
 ## Responsibility boundary
 
+The root `task` module owns the fixed task table and runnable ring.
+`arch::x86_64::task` owns task stack mapping, the saved frame layout, and the
+small timer-entry/trampoline assembly. Policy stays in Rust; CR3 remains
+shared across all kernel tasks.
+
 * **UEFI firmware**: powers on the machine, initializes basic platform
   devices, and runs the boot manager.
 * **rust-osdev bootloader**: locates and loads the pvKernel ELF binary,
@@ -41,12 +46,15 @@ pvKernel ELF (kernel_main)
   legacy 8259 PIC and PIT drivers, the physical frame allocator and active
   page-table access, a provisional `int 0x80` syscall ABI, and (test-only)
   CPL0 → CPL3 userspace entry, and framebuffer rendering.
+* **Kernel tasks**: 0.0.8 adds bounded, preemptive, single-core ring-0 tasks
+  with separate guarded stacks. It does not schedule CPL3 payloads or switch
+  CR3; see [docs/architecture/kernel-tasks.md](docs/architecture/kernel-tasks.md).
 * **Future pvOS userspace**: 0.0.6 adds only a minimal, test-only CPL0 →
   CPL3 transition and bootstrap syscall ABI (see
   [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)
   and [docs/architecture/syscalls.md](docs/architecture/syscalls.md)); a
-  process model, scheduler, and ELF userspace loading remain future
-  roadmap items (see [ROADMAP.md](ROADMAP.md)); pvKernel does not
+  process model and ELF userspace loading remain future roadmap items (see
+  [ROADMAP.md](ROADMAP.md)); pvKernel does not
   currently support them.
 
 ## Initialization order
@@ -99,23 +107,27 @@ pvKernel ELF (kernel_main)
    0.0.1: dark background, centered blue `P` (`#00B7EF`).
 7. A controlled `int3` breakpoint test verifies the IDT is functioning and
    execution resumes correctly.
-8. A boot-time timer verification unmasks PIT IRQ0, enables maskable
-   hardware interrupts, and confirms the tick counter advances (see
-   [docs/architecture/timer.md](docs/architecture/timer.md)).
-9. If the `fault-tests` Cargo feature is enabled, a deliberate page fault is
+8. `task::init` reserves and verifies task stacks. Two finite smoke tasks
+   are created, but not run yet, before IRQ0 is unmasked.
+9. PIT IRQ0 is unmasked, maskable interrupts are enabled, the two tasks run
+   under preemption and return to bootstrap, and timer progress is confirmed
+   (see [docs/architecture/timer.md](docs/architecture/timer.md)).
+10. If the `fault-tests` Cargo feature is enabled, a deliberate page fault is
    triggered and matched against its expected faulting address.
-10. If the `mem-fault-tests` Cargo feature is enabled, a temporary page is
+11. If the `mem-fault-tests` Cargo feature is enabled, a temporary page is
     mapped, written to, unmapped, and deliberately re-accessed, matching the
     resulting page fault against its expected address (see
     [docs/development/memory-testing.md](docs/development/memory-testing.md)).
-11. If `supervisor-write-protection-test` is enabled, a CPL0 write to a
+12. If `supervisor-write-protection-test` is enabled, a CPL0 write to a
     supervisor-only read-only page verifies CR0.WP behavior through an
     expected protection-violation page fault.
-12. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
+13. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
     test payload is mapped into the reserved userspace range and entered at
     CPL3 via `iretq`; the scenario ends deterministically (see
     [docs/development/userspace-testing.md](docs/development/userspace-testing.md)).
-13. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
+14. The timer entry saves the complete interrupt context, schedules CPL0
+    contexts only, and resumes bootstrap after both smoke tasks exit.
+15. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
     the `qemu-test` Cargo feature is enabled, in which case QEMU exits
     deterministically instead (see
     [docs/development/testing.md](docs/development/testing.md)).
