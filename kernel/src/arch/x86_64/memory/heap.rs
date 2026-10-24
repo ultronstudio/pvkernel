@@ -16,6 +16,15 @@ pub const HEAP_START: u64 = 0xFFFF_9000_1000_0000;
 pub const HEAP_SIZE: usize = 1024 * 1024;
 const PAGE_SIZE: u64 = Size4KiB::SIZE;
 
+const fn heap_end() -> u64 {
+    match HEAP_START.checked_add(HEAP_SIZE as u64) {
+        Some(end) => end,
+        None => panic!("kernel heap virtual range overflows"),
+    }
+}
+
+pub const HEAP_END: u64 = heap_end();
+
 #[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]
 static EXPECTED_GUARD_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]
@@ -27,6 +36,7 @@ pub fn init() {
     let end = start
         .checked_add(size)
         .expect("invalid heap virtual range: overflow");
+    assert_eq!(end, HEAP_END, "heap end constant is inconsistent");
     assert_eq!(start % PAGE_SIZE, 0, "heap start is not page aligned");
     assert_eq!(size % PAGE_SIZE, 0, "heap size is not page compatible");
     let lower_guard = start
@@ -49,7 +59,13 @@ pub fn init() {
         }
 
         for index in 0..page_count {
-            let address = start + index as u64 * PAGE_SIZE;
+            let offset = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_mul(PAGE_SIZE))
+                .expect("heap page offset overflows");
+            let address = start
+                .checked_add(offset)
+                .expect("heap page address overflows");
             let virt = paging::canonical_virt_addr(address).expect("heap range is non-canonical");
             assert!(
                 matches!(space.translate(virt), Translation::NotMapped),
@@ -175,7 +191,7 @@ pub fn run_smoke_tests() {
 }
 
 fn in_heap(address: usize) -> bool {
-    address >= HEAP_START as usize && address < (HEAP_START as usize + HEAP_SIZE)
+    address >= HEAP_START as usize && address < HEAP_END as usize
 }
 
 fn fragmentation_test() {
@@ -215,7 +231,11 @@ fn fragmentation_test() {
     let boundary = unsafe { super::allocator::ALLOCATOR.alloc(near_capacity) };
     assert!(!boundary.is_null(), "near-capacity heap allocation failed");
     assert!(in_heap(boundary as usize));
-    assert!(boundary as usize + near_capacity.size() <= HEAP_START as usize + HEAP_SIZE);
+    assert!(
+        (boundary as usize)
+            .checked_add(near_capacity.size())
+            .is_some_and(|end| end <= HEAP_END as usize)
+    );
     // SAFETY: matching live allocation.
     unsafe { super::allocator::ALLOCATOR.dealloc(boundary, near_capacity) };
 }
@@ -257,6 +277,6 @@ pub(crate) fn take_expected_guard_fault(
 ) -> bool {
     address == EXPECTED_GUARD_FAULT_ADDRESS.load(Ordering::Relaxed)
         && cpl == x86_64::PrivilegeLevel::Ring0
-        && EXPECTED_GUARD_FAULT_ARMED.swap(false, Ordering::Relaxed)
         && error.is_empty()
+        && EXPECTED_GUARD_FAULT_ARMED.swap(false, Ordering::Relaxed)
 }
