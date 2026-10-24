@@ -21,6 +21,7 @@ mod allocator;
 mod frame_allocator;
 mod heap;
 mod paging;
+mod user_stack;
 
 #[cfg(feature = "qemu-test")]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,8 +37,10 @@ use x86_64::{
     structures::paging::PageTableFlags,
 };
 
+pub(super) use address_space::KernelAddressSpace;
 pub use address_space::{AddressSpace, AddressSpaceError, with_kernel_address_space};
 pub use paging::{Permissions, Translation};
+pub use user_stack::{USER_STACK_PAGES, USER_STACK_SIZE, USER_STACK_TOP, UserStack};
 
 use frame_allocator::BootFrameAllocator;
 use paging::MemoryError;
@@ -322,6 +325,66 @@ pub fn run_address_space_smoke_test() {
         ));
     });
     kprintln!("[process-test] inactive roots, isolation, and shared kernel mappings passed");
+}
+
+#[cfg(feature = "qemu-test")]
+pub fn run_user_stack_smoke_test() {
+    use x86_64::structures::paging::{Page, PageSize, PageTableFlags, Size4KiB};
+
+    kprintln!("[process-test] checking guarded userspace stack and RSP0 policy");
+    with_kernel_address_space(|kernel| {
+        let mut address_space = kernel
+            .create_address_space()
+            .expect("failed to create user-stack test root");
+        let stack = UserStack::map(&mut address_space, kernel)
+            .expect("failed to map fixed userspace stack");
+        assert_eq!(stack.top, USER_STACK_TOP);
+        assert_eq!(stack.top - stack.bottom, USER_STACK_SIZE);
+        assert_eq!(stack.top % Size4KiB::SIZE, 0);
+        assert!(matches!(
+            address_space
+                .translate(kernel, VirtAddr::new(stack.guard))
+                .unwrap(),
+            Translation::NotMapped
+        ));
+        let mut address = stack.bottom;
+        while address < stack.top {
+            match address_space
+                .translate(kernel, VirtAddr::new(address))
+                .expect("user stack translation failed")
+            {
+                Translation::Mapped { flags, .. } => assert!(flags.contains(
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::USER_ACCESSIBLE
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::NO_EXECUTE
+                )),
+                other => panic!("user stack page is absent: {other:?}"),
+            }
+            address = address
+                .checked_add(Size4KiB::SIZE)
+                .expect("stack walk overflow");
+        }
+        assert_eq!(address_space.mapped_user_pages(), USER_STACK_PAGES);
+        let (_, kernel_stack_top) = crate::arch::x86_64::task::stack_bounds(0)
+            .expect("kernel task stack slot zero must exist");
+        crate::arch::x86_64::gdt::set_current_rsp0(kernel_stack_top)
+            .expect("validated task stack RSP0 was rejected");
+        assert_eq!(
+            crate::arch::x86_64::gdt::current_rsp0().expect("TSS is unavailable"),
+            kernel_stack_top
+        );
+        crate::arch::x86_64::gdt::set_kernel_fallback_rsp0()
+            .expect("static kernel fallback RSP0 could not be restored");
+        assert_eq!(
+            crate::arch::x86_64::gdt::current_rsp0().expect("TSS is unavailable"),
+            crate::arch::x86_64::gdt::kernel_fallback_rsp0().as_u64()
+        );
+        // Keep Page imported here as an explicit alignment/type check for the
+        // accepted stack boundary.
+        assert!(Page::<Size4KiB>::from_start_address(VirtAddr::new(stack.bottom)).is_ok());
+    });
+    kprintln!("[process-test] guarded user stack and RSP0 policy passed");
 }
 
 #[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]

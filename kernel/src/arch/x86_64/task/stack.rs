@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::{
     VirtAddr,
     structures::paging::{Page, PageTableFlags, Size4KiB},
@@ -15,6 +16,7 @@ const GUARD_PAGES: u64 = 2;
 const SLOT_PAGES: u64 = STACK_SIZE / PAGE_SIZE + GUARD_PAGES;
 pub const STACK_REGION_START: u64 = 0xffff_9000_2000_0000;
 const STACK_REGION_SIZE: u64 = stack_region_size();
+static STACKS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 const fn stack_region_size() -> u64 {
     let slot_size = match SLOT_PAGES.checked_mul(PAGE_SIZE) {
@@ -102,11 +104,17 @@ pub fn init_stacks() {
             ));
         }
     });
+    STACKS_INITIALIZED.store(true, Ordering::Release);
     kprintln!("[scheduler] task stacks verified supervisor RW/NX with guard pages");
 }
 
 pub fn stack_bounds(slot: usize) -> Option<(u64, u64)> {
     (slot < MAX_KERNEL_TASKS).then(|| bounds_unchecked(slot))
+}
+
+pub fn is_validated_stack_top(top: u64) -> bool {
+    STACKS_INITIALIZED.load(Ordering::Acquire)
+        && (0..MAX_KERNEL_TASKS).any(|slot| stack_bounds(slot).is_some_and(|(_, high)| high == top))
 }
 
 fn bounds_unchecked(slot: usize) -> (u64, u64) {

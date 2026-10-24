@@ -55,9 +55,9 @@ static DOUBLE_FAULT_STACK: DoubleFaultStack =
 /// a CPL3-to-CPL0 interrupt or exception occurs (in particular, the `int
 /// 0x80` syscall gate; see `arch::x86_64::syscall`).
 ///
-/// 0.0.6 has no thread or process model, so there is exactly one such stack
-/// for the whole kernel (the boot CPU's transition stack), not a per-thread
-/// kernel stack. Sized generously (16 KiB) for the hardware interrupt frame,
+/// This static stack is the bootstrap/kernel-task fallback. User tasks select
+/// their scheduler-owned kernel stack through the checked RSP0 setter below.
+/// It is sized generously (16 KiB) for the hardware interrupt frame,
 /// the syscall entry stub's saved general-purpose registers, the Rust
 /// dispatcher's own stack usage, and a nested hardware interrupt (e.g. the
 /// PIT timer) firing while the syscall path is on this stack; there is no
@@ -92,7 +92,15 @@ struct Selectors {
     user_data_selector: SegmentSelector,
 }
 
-static TSS: Once<TaskStateSegment> = Once::new();
+struct TssCell(UnsafeCell<TaskStateSegment>);
+
+// SAFETY: pvKernel is single-core. The CPU reads RSP0 only on a privilege
+// transition from CPL3; updates are restricted to CPL0 with IF clear, when no
+// such transition can concurrently use the TSS. Other TSS fields are
+// initialized once and never mutated after `ltr`.
+unsafe impl Sync for TssCell {}
+
+static TSS: Once<TssCell> = Once::new();
 static GDT: Once<(GlobalDescriptorTable, Selectors)> = Once::new();
 
 fn double_fault_stack_top() -> VirtAddr {
@@ -195,13 +203,16 @@ pub fn init() {
         let mut tss = TaskStateSegment::new();
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = double_fault_stack_top();
         tss.privilege_stack_table[0] = syscall_stack_top();
-        tss
+        TssCell(UnsafeCell::new(tss))
     });
 
     let (gdt, selectors) = GDT.call_once(|| {
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
-        let tss_selector = gdt.append(Descriptor::tss_segment(tss));
+        // SAFETY: this is the one initialized TSS cell, and its address is
+        // stable for kernel lifetime; the GDT descriptor stores that address.
+        let tss_ref = unsafe { &*tss.0.get() };
+        let tss_selector = gdt.append(Descriptor::tss_segment(tss_ref));
         // `Descriptor::user_code_segment()` / `user_data_segment()` already
         // encode DPL 3; `GlobalDescriptorTable::append` derives the
         // returned `SegmentSelector`'s RPL from that same descriptor DPL,
@@ -251,6 +262,69 @@ pub fn init() {
         "[gdt] user data selector initialized: {:#06x}",
         selectors.user_data_selector.0
     );
+}
+
+/// Installs the kernel-entry stack belonging to one allocated scheduler
+/// stack slot as the next CPL3-to-CPL0 RSP0 destination.
+///
+/// The caller must keep interrupts disabled through the later context
+/// adoption and `iretq`. Only exact tops returned by the task stack layout
+/// are accepted; those stacks were mapped supervisor RW/NX with guards by
+/// `task::init_stacks`.
+pub fn set_current_rsp0(stack_top: u64) -> Result<(), Rsp0Error> {
+    if x86_64::instructions::interrupts::are_enabled() {
+        return Err(Rsp0Error::InterruptsEnabled);
+    }
+    let top = VirtAddr::try_new(stack_top).map_err(|_| Rsp0Error::InvalidAddress)?;
+    if stack_top % 16 != 0 {
+        return Err(Rsp0Error::InvalidAddress);
+    }
+    if !crate::arch::x86_64::task::is_validated_stack_top(stack_top) {
+        return Err(Rsp0Error::NotTaskStackTop);
+    }
+    write_rsp0(top)
+}
+
+/// Restores the static, kernel-lifetime privilege-transition stack for
+/// bootstrap and kernel-task execution. It must be selected before a user
+/// task's kernel stack becomes inactive or reusable.
+pub fn set_kernel_fallback_rsp0() -> Result<(), Rsp0Error> {
+    if x86_64::instructions::interrupts::are_enabled() {
+        return Err(Rsp0Error::InterruptsEnabled);
+    }
+    write_rsp0(kernel_fallback_rsp0())
+}
+
+pub fn kernel_fallback_rsp0() -> VirtAddr {
+    syscall_stack_top()
+}
+
+/// Reads the programmed privilege-transition stack top. Intended for
+/// diagnostics and deterministic architecture tests; scheduler callers still
+/// select only validated tops through the setters above.
+pub fn current_rsp0() -> Result<u64, Rsp0Error> {
+    let tss = TSS.get().ok_or(Rsp0Error::TssUnavailable)?;
+    // SAFETY: RSP0 is a scalar read. Single-core execution and the existing
+    // IF-masked setter prevent a concurrent Rust update; hardware reads it
+    // only during a CPL3 privilege transition.
+    Ok(unsafe { (*tss.0.get()).privilege_stack_table[0].as_u64() })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rsp0Error {
+    InterruptsEnabled,
+    InvalidAddress,
+    NotTaskStackTop,
+    TssUnavailable,
+}
+
+fn write_rsp0(top: VirtAddr) -> Result<(), Rsp0Error> {
+    let tss = TSS.get().ok_or(Rsp0Error::TssUnavailable)?;
+    // SAFETY: called only on the single CPU with IF clear. The CPU is in CPL0
+    // and cannot be performing a CPL3 RSP0 transition concurrently; only the
+    // RSP0 field changes, while the TSS/GDT storage remains kernel-lifetime.
+    unsafe { (*tss.0.get()).privilege_stack_table[0] = top };
+    Ok(())
 }
 
 /// Returns the ring-3 user code segment selector (RPL 3) installed by

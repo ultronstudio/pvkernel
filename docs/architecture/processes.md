@@ -2,9 +2,10 @@
 
 **Status:** authoritative 0.0.9 design; implementation in progress. The
 stable-baseline sections describe pvKernel 0.0.8 at
-`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity and
-Phase B boot-mapping audit/inactive-root construction are now implemented on
-the 0.0.9 branch; userspace scheduling and CR3 activation are not yet present.
+`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
+Phase B boot-mapping audit/inactive-root construction, and Phase C user-stack
+and RSP0 support are implemented on the 0.0.9 branch; userspace scheduling
+and CR3 activation are not yet present.
 
 ## 1. Scope and goals
 
@@ -88,8 +89,14 @@ interrupt entry uses the current RSP, not RSP0. Add a narrow checked
 `set_current_rsp0(top)` operation later. Immediately before every `iretq`
 that returns to CPL3, RSP0 must contain the validated kernel-stack top of
 that exact userspace Task. Do not treat RSP0 as the current kernel task's
-stack pointer. When switching from a user Task to a kernel Task/bootstrap,
 restore the safe fallback before the outgoing user stack can become reusable.
+
+Implementation note: the TSS now has a single-core `UnsafeCell` wrapper for
+RSP0 updates. `set_current_rsp0` rejects calls while IF is set and accepts
+only an aligned top matching an initialized guarded task-stack slot.
+`set_kernel_fallback_rsp0` restores the static syscall stack. QEMU verifies
+both programmed values. The setter does not select tasks or change the
+context-switch path.
 
 ## 6. Current paging, userspace and syscall facts
 
@@ -373,6 +380,12 @@ Give every process a dedicated 32 KiB user stack (8 pages), USER, writable,
 NX; one downward guard page remains unmapped. Initial RSP is the exclusive
 page-aligned USER_STACK_TOP. Use checked stack arithmetic and zero frames
 before USER publication. Do not overlap ELF segments, stack or guard.
+
+Implementation note: `UserStack::map` applies this fixed layout to an
+inactive AddressSpace, rejects collisions, initializes every page through
+the zeroed-user-page mapping path, and rolls back installed leaves on error.
+The QEMU stack test verifies all eight effective USER/RW/NX mappings and the
+unmapped lower guard. It does not yet enter CPL3 using this stack.
 
 User stack is for ordinary CPL3 execution. Kernel stack is for CPL3→CPL0
 timer/syscall/exception entry and handler execution. A process still needs a
