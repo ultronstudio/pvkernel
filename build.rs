@@ -8,6 +8,9 @@ fn main() {
             .expect("Cargo does not set CARGO_BIN_FILE_KERNEL_kernel path"),
     );
 
+    let staged_kernel = out_dir.join("pvkernel-kernel.elf");
+    std::fs::copy(&kernel_binary, &staged_kernel).expect("failed to stage kernel ELF");
+
     let uefi_image = out_dir.join("pvkernel-uefi.img");
 
     bootloader::UefiBoot::new(&kernel_binary)

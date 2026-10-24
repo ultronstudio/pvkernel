@@ -76,17 +76,28 @@ runs:
           suffix="${version}-${label}"
         fi
 
-        kernel_elf="target/x86_64-unknown-none/release/kernel"
-        if [ ! -f "$kernel_elf" ]; then
-          echo "::error::kernel ELF not found at $kernel_elf" >&2
+        out_dir=""
+        while IFS= read -r candidate; do
+          if [ -f "$candidate/pvkernel-kernel.elf" ] &&
+             [ -f "$candidate/pvkernel-uefi.img" ]; then
+            if [ -n "$out_dir" ]; then
+              echo "::error::multiple matching pvkernel-runner OUT_DIR directories found" >&2
+              exit 1
+            fi
+            out_dir="$candidate"
+          fi
+        done < <(find target/release/build -maxdepth 2 \
+          -type d \
+          -path '*/pvkernel-runner-*/out' \
+          -print)
+
+        if [ -z "$out_dir" ]; then
+          echo "::error::no pvkernel-runner OUT_DIR contains both pvkernel-kernel.elf and pvkernel-uefi.img" >&2
           exit 1
         fi
 
-        uefi_img=$(find target/release/build/pvkernel-runner-*/out -maxdepth 1 -name 'pvkernel-uefi.img' -type f | head -n1)
-        if [ -z "$uefi_img" ] || [ ! -f "$uefi_img" ]; then
-          echo "::error::UEFI disk image not found under target/release/build/pvkernel-runner-*/out" >&2
-          exit 1
-        fi
+        kernel_elf="$out_dir/pvkernel-kernel.elf"
+        uefi_img="$out_dir/pvkernel-uefi.img"
 
         dir="release-artifacts"
         # Deliberately not `rm -rf`: the SBOM was already generated into
