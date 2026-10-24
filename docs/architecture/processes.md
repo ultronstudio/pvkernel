@@ -1,0 +1,598 @@
+# pvKernel 0.0.9 process architecture
+
+**Status:** design for human review; no process implementation is present in
+pvKernel 0.0.8. This document describes the stable repository at
+`2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`.
+
+## 1. Scope and goals
+
+The milestone extends the proven single-core kernel-task scheduler to
+isolated userspace processes. Its central rule is: **Process** owns an
+address space and process-wide resources; **Task** is a schedulable execution
+context. The first implementation may have one user task per process, while
+leaving process identity independent of that initial one-to-one relationship.
+This is design only; it does not change v0.0.8 or implement any feature below.
+
+## 2. Current 0.0.8 baseline
+
+The working tree was clean. `main`, `origin/main`, and `v0.0.8` resolve to
+the commit above; `v0.0.8-rc.1` is historical. The workspace is a Rust 2024
+nightly `no_std` kernel binary with the stable package version 0.0.8.
+
+Authoritative code inspected includes `kernel/src/task/mod.rs`,
+`kernel/src/arch/x86_64/{task,interrupts.rs,gdt.rs,syscall,memory,userspace}`,
+`kernel/src/main.rs`, build/config files and the existing architecture,
+testing, security and release documentation. Source code governs where an
+older architecture document uses historical wording.
+
+## 3. Current scheduler facts
+
+`crate::task::SCHEDULER` is `Once<Mutex<Scheduler>>`. `Scheduler` owns an
+initialized flag, `[TaskSlot; MAX_KERNEL_TASKS]`, a fixed circular
+`ReadyQueue`, `current: Option<TaskId>`, and `bootstrap_rsp`.
+`MAX_KERNEL_TASKS` is 8. Each slot has `generation: u64`, `TaskState`, saved
+context RSP and a queued flag. `TaskId` is `{ slot: u8, generation: u64 }`;
+lookups bounds-check the slot and check generation/state. States are
+`Vacant`, `Ready`, `Running`, `Exiting`, `Exited`, `Retired`. Reuse increments
+with `checked_add`; exhausted slots become permanently `Retired`. The queue
+stores optional TaskIds in a bounded ring. The bootstrap/idle context is not
+a task slot: the first IRQ saves it to `bootstrap_rsp`; `current == None`
+identifies it.
+
+Scheduler APIs wrap mutex access in `interrupts::without_interrupts`;
+timer-gate entry already clears IF. In `timer_schedule`, task state and
+selection updates happen inside this lock, which is released when the
+closure returns. The PIC EOI is sent after lock release. Assembly adopts
+the returned context pointer only after Rust returns. The synchronization
+assumption is one CPU; interrupt masking is not SMP protection.
+
+`task_exit` marks the running task `Exiting`, then waits on its own stack
+with `sti; hlt`. A later PIT switch saves that context, marks it `Exited`,
+and switches away. This two-phase rule prevents reuse of a live stack.
+
+## 4. Current interrupt and context facts
+
+PIT IRQ0 is PIC vector 32 (`IrqLine::Timer.vector()`). The IDT entry is
+`pvkernel_timer_irq_entry` assembly. Push order is `RAX, RBX, RCX, RDX, RBP,
+RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15`; memory at saved RSP is
+therefore `R15..R8, RDI, RSI, RBP, RDX, RCX, RBX, RAX`, then the hardware
+`RIP, CS, RFLAGS, RSP, SS` frame. This is the 20-qword `Context` (160 bytes).
+
+The assembly aligns its temporary Rust call stack to 16 bytes, executes
+`cld`, calls `pvkernel_timer_schedule`, assigns the returned pointer to RSP,
+pops the selected GPRs, then executes `iretq`. The interrupt gate clears IF
+until selected RFLAGS is restored. The current timer path records a tick;
+for scheduled CPL0 contexts it releases scheduler lock, EOIs the PIC, and
+then returns the chosen context to assembly. If saved `CS & 3 == 3`, it
+records the tick, sends EOI and returns the same user context without
+scheduling. Existing user tests prove timer delivery, not user preemption.
+Hardware provides the five-word long-mode return frame used by this code;
+on CPL3 entry it first switches to TSS.RSP0, while same-CPL entry uses the
+current stack.
+
+## 5. Current TSS / RSP0 facts
+
+`arch::x86_64::gdt::init` creates GDT/TSS, puts the double-fault stack in
+IST[0], and puts the top of one static 16 KiB `SyscallStack` in
+`TSS.privilege_stack_table[0]` (RSP0). No code updates it after boot. CPL3
+entry and `int 0x80` tests depend on it; syscall test code checks that its
+saved frame is within this stack. Current CPL3 syscalls, exceptions and
+timer entries therefore share that static stack. This cannot support
+multiple preemptible userspace tasks because their live frames can overlap.
+
+Add a narrow checked `set_current_rsp0(top)` operation later. Invoke it with
+IF clear after selecting a task and before any return to CPL3. RSP0 must be
+the selected task's dedicated supervisor kernel-stack top, never its user
+stack or another task's stack.
+
+## 6. Current paging, userspace and syscall facts
+
+`memory::init` rejects `CR4.LA57`, verifies NX/write-protect prerequisites,
+reads active CR3 and builds one `OffsetPageTable` using the bootloader's
+physical-memory offset. The active PML4 is reached at offset + CR3 physical
+address. `KernelAddressSpace` and monotonic `BootFrameAllocator` live behind
+one `Once<Mutex<_>>`. `map_new_page`, unmap, permission update and translate
+operate on that active root only. Missing intermediate tables use the frame
+allocator. Mapping/permission changes flush the changed active page; unmap
+flushes but frames are not reusable. There is no inactive-root API, page
+table ownership registry or recursive mapping. The bootloader's physical
+mapping covers usable physical memory at a dynamically chosen offset and is
+needed to access page-table frames.
+
+The active root starts with bootloader mappings. Kernel image, boot stack,
+boot info, framebuffer and physical-memory mapping use dynamic placement;
+the kernel does not keep a numeric manifest of them. Kernel-created ranges
+are documented in section 7. User tests currently map code/stack inside
+`USERSPACE_RANGE_BASE=0x0000_6000_0000_0000` in that same active root; this
+does not prove address-space isolation. W^X mapping permissions include
+supervisor RW/NX, supervisor RO/NX, user RW/NX and user RO/X. USER must be
+clear through every parent as well as the leaf. No current mapping sets
+GLOBAL. Mapping operations use 4 KiB pages; they reject parent huge pages.
+
+The provisional `int 0x80` gate is DPL3. Its assembly entry saves all 15
+GPRs on RSP0, calls the scalar dispatcher, writes its return to saved RAX,
+restores registers and `iretq`s. As an interrupt gate, it clears IF; PIT
+cannot preempt a syscall body. Keep this non-preemptible syscall policy.
+
+## 7. Current virtual-address map
+
+Four-level canonical ranges are lower `0x0000_0000_0000_0000` through
+`0x0000_7fff_ffff_ffff`, upper `0xffff_8000_0000_0000` through
+`0xffff_ffff_ffff_ffff`. Exact dynamic bootloader ranges cannot be inferred
+as constants from current source.
+
+| Region | Current address/range | Notes |
+|---|---|---|
+| Kernel image, boot stack, boot info | Bootloader-selected dynamic mappings | Exact ranges not retained in kernel metadata |
+| Physical-memory map | BootInfo-provided dynamic base; maps usable physical memory | Required by OffsetPageTable; varies by boot |
+| Framebuffer | Bootloader-selected dynamic mapping | Dimensions retained; mapping range not tracked |
+| Scratch | `0xffff_9000_0000_0000` | Test-only; checked unmapped before use |
+| Kernel heap | `0xffff_9000_1000_0000..0xffff_9000_1010_0000` | 1 MiB supervisor RW/NX; guard pages at `...0ffff000` and `...10100000` |
+| Kernel task stacks | `0xffff_9000_2000_0000..0xffff_9000_2003_0000` | 8 x 16 KiB RW/NX supervisor stacks; one unmapped page on each side; 24 KiB stride |
+| User test code | `0x0000_6000_0000_0000` | One test-only RX+USER page in the current root |
+| User test guard | `0x0000_6000_0000_1000` | One deliberately unmapped page between code and stack |
+| User test stack | `0x0000_6000_0000_2000..0x0000_6000_0000_3000` | One test-only RW/NX+USER page in the current root |
+| User supervisor-fault probe | `0xffff_9000_0000_2000` | Test-only supervisor page near scratch base |
+| Other reservations | No global reservation registry | Collision checks are local to mapping callers |
+
+The explicit scratch, heap and task-stack ranges are all in PML4 index 288;
+the current test user pages are in lower-half PML4 index 192. The dynamic
+bootloader mappings' indices are not established by current code.
+
+No numeric address is claimed for dynamic bootloader mappings. A future
+mapping audit must record actual entries before a process root is activated.
+
+## 8. Proposed user virtual layout
+
+Use only the lower canonical half (`USER_MIN=0x0000_0000_0001_0000`,
+exclusive `USER_MAX=0x0000_8000_0000_0000`). Keep addresses 0 through 64 KiB
+unmapped, including null and low aliases. USER_MAX is an exclusive bound,
+not dereferenceable. All arithmetic and rounding is checked. This layout is
+compatible with 48-bit canonical addressing and `LA57=0`.
+
+| Region | Proposed layout |
+|---|---|
+| Forbidden low | `0..0x10000`, unmapped |
+| ELF ET_EXEC | `0x0000_0000_0040_0000..0x0000_4000_0000_0000` |
+| Future heap | `0x0000_4000_0000_0000..0x0000_6000_0000_0000`, reserved only |
+| Future mmap | `0x0000_6000_0000_0000..0x0000_7000_0000_0000`, reserved only |
+| Future growth area | `0x0000_7000_0000_0000..USER_MAX`, reserved |
+| User stack | `USER_STACK_TOP=0x0000_7fff_ffff_f000`, exclusive; 8 pages / 32 KiB below it |
+| User stack guard | One unmapped page below the mapped stack |
+
+The user stack's low mapped address is TOP - 8*4096; guard is the prior
+page. ELF segments may not overlap stack or guard. Historical test base
+`0x6000_0000_0000` is isolated per process and lies in the reserved future
+mmap band. Root creation still checks actual boot mappings for collision.
+
+## 9. Process vs Task
+
+Keep `ProcessId` separate from existing `TaskId`. Process owns AddressSpace,
+PID, parent, name, lifecycle, accounting and exit metadata. Task owns saved
+context, kind, kernel stack and runnable state. Initially `TaskKind::User(ProcessId)`
+is one task per process. Later multiple tasks may hold the same ProcessId.
+
+Add only execution fields to a scheduler slot: `TaskKind`, kernel-stack top,
+and opaque address-space/process handle (or ProcessId resolved into an
+architecture `SwitchPlan`). Keep ELF, PID, PPID, names, exit code, filesystem
+and future FDs out of scheduler policy. Do not spread naked CR3 values into
+generic scheduler code.
+
+## 10. ProcessId
+
+Use `ProcessId { slot: u8, generation: u64 }`, matching current TaskId widths
+and an 8-slot process table. First allocation advances generation zero to
+one. Lookup checks bounds, generation and state
+before access; invalid/stale IDs return typed errors or `None`. Increment
+generation with `checked_add`; retire an exhausted slot permanently. It is
+an internal handle, not a pointer, PID, or unchecked array index.
+
+## 11. PID
+
+Use `Pid(u64)` for userspace/log identity. Allocate monotonically per boot
+with checked increment and never reuse, even after reap. On exhaustion,
+return `PidExhausted`; never wrap. PID is not an authorization handle;
+internal parent and object references use ProcessId.
+
+## 12. Process table
+
+Use a bounded static table with `MAX_PROCESSES=8`. Eight records of a few
+hundred bytes cost only a few KiB; correctness must not require heap
+allocation. A slot records generation, lifecycle, PID, optional ProcessId
+parent, AddressSpace ownership, primary TaskId, bounded name, create/exit
+ticks, CPU ticks, mapped user pages, task count and exit metadata. `Creating`
+is private and not schedulable. Capacity exhaustion returns
+`ProcessTableFull`, not panic.
+
+Do not hold process and scheduler locks over context switch. Prefer creating
+an unpublished process first, then publish it Alive and enqueue only when all
+resources/context are ready. Define one lock order or avoid nested locks.
+
+## 13. Lifecycle, Zombie and reap
+
+Legal lifecycle: `Vacant -> Creating -> Alive -> Exiting -> Zombie -> reap
+-> Vacant`, plus `Retired` on generation exhaustion. Failed creation returns
+Creating to Vacant (or Retired if exhausted) and is never schedulable. Alive
+means a valid AddressSpace and user task exist. Exiting cannot be selected
+for ordinary new work, though it may still execute on its kernel stack.
+Zombie has no executing task and retains exit data. Only Zombie may be
+reaped. Reaping invalidates old ProcessId through checked generation change.
+Creating, Exiting or Zombie must never be enqueued; Alive requires all
+address-space and task invariants.
+
+Zombie retains PID, parent, exit status/reason, CPU accounting and fault
+metadata for future wait/reap, init, service supervision, Crash Viewer and
+System Monitor. No waitpid is implemented now.
+
+## 14. Parent and exit reason
+
+Store `parent: Option<ProcessId>`, not only PID. Root/test process may have
+None. A stale parent handle remains safely detectable; future PID 1/service
+manager may adopt orphans by updating it. No init semantics are implemented.
+
+Start `ProcessExitReason` with `Exited { status: i32 }` and
+`Fault { vector: u8, error_code: Option<u64>, fault_address: Option<u64>,
+rip: u64 }`. Leave enum room for Killed, Signal, SecurityViolation and
+OutOfMemory. Capture only trusted scalar hardware state; do not inspect user
+memory to report a fault.
+
+## 15. Fault containment
+
+Current #UD, #GP and #PF handlers log and invoke global fatal handling.
+#GP/#PF report saved CS privilege; #PF reads CR2 and error bits. Expected
+user-fault QEMU tests exit the test successfully, not contain a process.
+
+Later, classify by interrupted frame's saved CS RPL: CPL0 fault remains
+kernel-fatal; CPL3 #PF/#GP/#UD records structured metadata and transitions
+that process to Exiting. PF USER_MODE is a useful consistency check, not the
+only classifier. #UD has no error code, #GP has one, and #PF also records
+CR2. Existing Rust interrupt handlers return through the faulting frame or
+halt the kernel. They cannot safely mark a process dead and return. Add a
+common non-returning exception-to-scheduler handoff that captures the frame,
+drops locks, and switches away on the task's kernel stack. Never resume the
+faulting RIP; never reuse the active stack early; never hold process or
+scheduler locks through handoff.
+
+## 16. AddressSpace and frame ownership
+
+Create an owned `AddressSpace` abstraction around a root PML4 frame and
+page-table/mapping ownership metadata. It provides checked map/unmap/translate
+and user-range inspection; only x86 switch code deals in CR3. Candidate
+metadata includes root, intermediate-table frames, owned user frames/mappings
+and mapped-page count. Choose storage consistent with actual heap/metadata
+limits.
+
+The current BootFrameAllocator is monotonic and has no reclamation. AddressSpace
+tracks which frames/mappings belong to it; page mappings may later be torn
+down and process metadata reaped, but allocated backing frames remain
+kernel-lifetime owned in 0.0.9. Preserve ownership records for future general
+reclamation; do not claim a buddy allocator or returned physical memory.
+
+## 17. Kernel-global mappings and CR3 switching
+
+Each process root must map kernel text/rodata/data, heap, scheduler/process
+state, active kernel task stacks, timer/syscall/exception entry code, GDT,
+IDT, TSS, double-fault IST, physical-memory/table-walk support, and any
+bootloader mapping still used (e.g. framebuffer), at identical virtual
+addresses. PIC/PIT are currently port-I/O devices and need no virtual mapping;
+future MMIO must be inventoried. All kernel leaves and parent entries must
+have USER clear.
+
+The proposed split uses lower PML4 indices 0..255 for user and upper indices
+256..511 for kernel. Do not blindly copy the upper half based on current
+code: kernel image, boot stack, framebuffer, boot info and physical map use
+dynamic bootloader placement, and pvKernel has no manifest proving all live
+dependencies are in the upper half. Before activating another root, inspect
+the active PML4 and recursively audit present entries (including huge pages),
+record actual required ranges, prove user ranges clear of bootloader-owned
+state, and verify effective USER permissions. If a required kernel mapping
+lies in the user half, relocate/rebuild it or fail boot clearly. If the
+audit proves all required mappings are upper-half, cloning entries 256..511
+is the compact kernel-global rule. Never silently omit a dependency or expose
+it to CPL3.
+
+New roots must remain reachable through the shared physical mapping. The
+current active-only mapper cannot do this; inactive-root construction and
+ownership-safe mapping are prerequisites. CR3 switching correctness requires
+the executing kernel stack, switch assembly, scheduler state, GDT, IDT and
+TSS to remain mapped at identical VAs in the target. The mapping audit and
+clone verification establish that invariant; failure to establish it blocks
+process scheduling.
+
+## 18. User and kernel stacks
+
+Give every process a dedicated 32 KiB user stack (8 pages), USER, writable,
+NX; one downward guard page remains unmapped. Initial RSP is the exclusive
+page-aligned USER_STACK_TOP. Use checked stack arithmetic and zero frames
+before USER publication. Do not overlap ELF segments, stack or guard.
+
+User stack is for ordinary CPL3 execution. Kernel stack is for CPL3→CPL0
+timer/syscall/exception entry and handler execution. A process still needs a
+scheduler-owned supervisor-only RW/NX kernel stack with guards; never use
+the user stack for interrupt entry. Future threads each need their own
+kernel stack.
+
+## 19. TSS.RSP0 and CPL3 preemption
+
+Selecting user task B requires choosing B's AddressSpace and kernel-stack
+top, loading B's root if needed, setting TSS.RSP0 to B top, then restoring B
+context and `iretq` to CPL3. Do all handoff work with IF clear. Set RSP0
+before CPL3 return and never point it at an old/reused stack.
+
+Future timer order: hardware enters on current CPL stack or task RSP0;
+assembly saves all GPRs and full frame; Rust records tick/accounting and
+captures current context; under scheduler lock update state/select a small
+SwitchPlan; release lock; send PIC EOI; switch CR3 while current kernel stack
+and code are mapped in destination; update RSP0; return selected context
+pointer; assembly adopts RSP, restores registers and `iretq`. No process or
+scheduler lock crosses EOI, CR3 switch, RSP adoption or iretq. IF remains
+clear, preventing maskable same-core reentrancy during transition. NMI and
+double fault require shared mappings/IST treatment.
+
+| Transition | CR3 | RSP0 |
+|---|---|---|
+| kernel task A → kernel task B | unchanged kernel root | set/retain B top before future user return |
+| kernel → user A | kernel → A | set A top before iretq |
+| user A → kernel | A → kernel | set selected kernel-task top |
+| user A → user A | unchanged | restore A top |
+| user A → user B | A → B | set B top |
+
+The CPL3 timer early return must be removed only after a user's full context
+is saved on its own kernel stack and associated with a live task. The same
+Context should represent kernel and user timer returns. The syscall interrupt
+gate keeps the handler non-preemptible; pending PIT delivery occurs after
+iretq restores IF. Do not switch processes mid-syscall.
+
+## 20. Context representation
+
+Prefer the existing 15-GPR + five-word frame, already used by synthetic
+kernel task startup and timer switching. Prove in assembly/tests that CPL0
+and CPL3 timer frames share its 20-qword layout. A synthetic user frame uses
+GDT user CS/SS, validated executable RIP, mapped user RSP, and fixed RFLAGS
+`0x202` (reserved bit 1 and IF set; DF, IOPL, TF, NT, VM clear). Clear user
+registers rather than leak kernel values. Exceptions with hardware error
+codes are not timer Contexts; normalize them explicitly before any common
+handoff.
+
+## 21. Syscall policy and initial surface
+
+Keep provisional `int 0x80`, with no SYSCALL/SYSRET migration. Interrupt-gate
+entry clears IF, so the maskable PIT cannot preempt syscall Rust code; this
+already gives the recommended non-preemptible syscall policy. Preserve it.
+Only initial process-aware calls are `exit(status)` (does not return) and
+`getpid()`. Process creation stays an internal kernel/test operation. Do
+not add fork, exec/spawn, open/read/write, mmap, brk, signals or filesystem
+calls.
+
+## 22. User-copy design
+
+Centralize `copy_from_user`/`copy_to_user` around an AddressSpace handle.
+Validate low/null policy, 48-bit canonicality, full range in `[USER_MIN,
+USER_MAX)`, checked `start + len`, every touched page present, effective USER
+at all levels, and writable destination for copy-to-user. Handle unaligned
+and cross-page ranges; define zero-length semantics (recommended no
+deref, with syscall pointer policy explicit). Return typed errors for bad
+range, overflow, missing page and permissions.
+
+Do not validate then raw-memcpy user VA. Copy in page-sized chunks through
+the kernel physical-memory mapping after translation. This is safe only
+under 0.0.9 constraints: mappings are immutable while Alive, no user remap,
+mmap, demand paging, concurrent user threads or SMP; syscall IF is clear,
+single-core, and mapping edits cannot run during copy. Hold the address-space
+ownership guard and do not yield. Future remapping, threads or SMP invalidate
+this argument and require pinning/locking or fault-safe copy primitives.
+
+## 23. ELF scope and hostile-input validation
+
+Accept only ELF64, little-endian, x86_64 `ET_EXEC`, static executable,
+`PT_LOAD`, BSS. Reject ELF32, other machine/endian/type, PT_INTERP, dynamic
+linker/shared libraries, PIE unless explicitly reconsidered, relocations,
+TLS and demand paging. Parse checked fields from bytes (or narrowly audit a
+parser); do not default to unsafe struct casts over hostile input.
+
+Validate magic/class/endian/machine/type, ELF/header and program-header
+sizes, program-header offset/count/table overflow, `p_offset+p_filesz`,
+`p_vaddr+p_memsz`, `filesz <= memsz`, input file bounds, canonical user
+addresses and complete segment range inside user range, page-rounding
+overflow, segment and page-rounded overlap, stack/guard collision, supported
+alignment/flags, and W+X rejection. Entry must be canonical, user-range,
+mapped, and inside an executable segment. Malformed data returns typed
+loader errors, never panic.
+
+## 24. W^X, BSS and user-page publication
+
+Map `PF_X` executable, `!PF_X` as NX, `PF_W` writable; reject PF_W+PF_X.
+x86 has no separate ordinary-page read permission bit: present user pages
+are readable, with write and execute separately constrained. Reject
+page-rounded segment overlaps for the initial narrow loader rather than
+merging conflicting permissions.
+
+Zero newly allocated frames before user visibility. Copy `p_filesz`, zero
+`p_memsz-p_filesz` and page padding, install final permissions and USER bits
+only after initialization, then verify. Keep process Creating and task
+unqueued throughout. No stale RAM reaches userspace.
+
+## 25. Process creation transaction
+
+Reserve slot/generation, checked PID, parent/name/create tick; create
+AddressSpace and audited kernel mappings; parse/validate ELF; allocate/map/
+zero segments and stack; prepare scheduler task/context; verify selectors,
+RIP/RSP/permissions; then publish Alive and enqueue. Before publication no
+task is runnable. On failure cancel task reservation and return metadata to
+Vacant/Retired. Allocated frames/tables cannot be returned by the monotonic
+allocator and remain kernel-lifetime owned; record retained allocations.
+Consume PIDs on failed creation rather than reuse them.
+
+## 26. Exit, fault termination, Zombie and reap
+
+On `exit(status)`, user code enters `int 0x80`; mark Process Alive→Exiting
+and Task Running→Exiting, then never return to user. Stay on its kernel stack
+until later timer handoff saves it and switches away. Only then mark task
+inactive/Exited and process Zombie. Do not release root or stack while
+execution still uses either. User faults follow the same lifecycle with
+`Fault(...)`; no path returns to faulting RIP. An internal reaper accepts
+only Zombie with no executing task, invalidates ProcessId by checked
+generation advance (or retirement), removes metadata and never recycles PID.
+Public waitpid is not required now.
+
+## 27. Accounting and process names
+
+Internal read-only snapshot: PID, ProcessId, parent PID if parent handle is
+live, state, name, created/exit tick, CPU ticks, mapped user pages, task
+count and exit reason. Future System Monitor, Service Manager, Process
+Inspector and Crash Viewer can build on it; no syscall exposure now.
+
+Use fixed 32-byte ASCII/UTF-8 storage plus length, with explicit reject or
+truncate policy; no heap string. Name is descriptive, not authority.
+
+At each PIT scheduling tick, charge one tick to the task running at the
+boundary; user task ticks charge its process, including syscall kernel time
+because syscall IF is clear and task remains current. Kernel tasks may have
+per-task or kernel aggregate accounting. Use checked/saturating behavior
+with documented overflow, never wrap silently. `mapped_user_pages` counts
+present user 4 KiB leaf mappings owned by process; it is not RAM, RSS or
+working set. Percentage calculation belongs in userspace.
+
+## 28. Capacity review
+
+Current eight task stacks use 128 KiB mapped physical stack backing and
+192 KiB virtual span (eight 24 KiB slots, each 16 KiB stack plus two guards).
+Increasing to 16 would add 128 KiB backing and 192 KiB virtual span. Table
+metadata is small. Retain 8 shared scheduler slots and add at most 8 process
+slots initially; process and kernel tasks compete for the same slots. The
+bootstrap context is outside the table. Test mixed capacity. Any future
+capacity change updates arrays, stack arithmetic, process bounds and tests
+together.
+
+## 29. Module layout and ABI
+
+Likely split, consistent with current `task`/`arch` ownership:
+
+```text
+kernel/src/process/{mod.rs,id.rs,table.rs,state.rs,address_space.rs,
+                    elf.rs,user_copy.rs,accounting.rs}
+kernel/src/arch/x86_64/process/{mod.rs,cr3.rs,enter.rs,user_stack.rs}
+kernel/src/arch/x86_64/memory/{address_space.rs,paging.rs,...}
+kernel/src/task/{scheduler policy and context integration}
+```
+
+Keep lifecycle generic, scheduler policy separate, and CR3/TSS/privilege
+mechanics architecture-specific. Exact files should follow existing module
+ownership, not be mechanically created.
+
+Consider a tiny future no_std `pvkernel-abi` with ABI version, syscall
+numbers, scalar types and error codes only. No Process, AddressSpace, TCB,
+kernel pointer or page-table internals. 0.0.9 ABI is experimental; first
+meaningful compatibility checkpoint is 0.1.0. No crate created now.
+
+## 30. QEMU validation plan
+
+Use deterministic serial markers and PIT-tick watchdogs, never host wall
+time. Intentional user faults pass only when process termination and
+continued kernel activity are observed.
+
+| Scenario | Setup / purpose | Required success; failure |
+|---|---|---|
+| `process-smoke-test` | Embedded ELF enters CPL3, getpid, exit | deterministic entered/PID/exited markers; timeout/panic fails |
+| `process-preemption-test` | Two CPU-bound user tasks wait on each other's progress without yielding | both progress and finish before tick watchdog |
+| `address-space-isolation-test` | A/B map same VA to different frames with AA/BB and alternate repeatedly | each always sees own value over A→B→A; tests CR3/TLB/scheduler |
+| `user-stack-guard-fault-test` | User writes below mapped stack | process fault recorded, kernel continues |
+| `user-kernel-isolation-test` | CPL3 reads/writes supervisor mapping | controlled fault/denial; kernel data unchanged |
+| `user-fault-containment-test` | Separate #PF/#GP/#UD processes | metadata and Zombie observed, other work continues, no panic/return |
+| `process-exit-test` | Known exit status then sentinel user instruction | sentinel never runs; Zombie retains status |
+| `process-capacity-test` | Fill shared slots and request one more | typed error; no panic/partial publication |
+| `process-id-reuse-test` | Reap and reuse slot | new generation/PID; old ProcessId rejected |
+| `elf-loader-test` | Valid static ELF with data and BSS | enters; zero BSS/padding; expected exit |
+| `elf-malformed-test` | Bad magic, ELF32, endian, machine/type, PT_INTERP, filesz>memsz, offset/address overflow, out-of-range/overlap, W+X, invalid/non-executable/noncanonical entry | deterministic loader error, no panic/partial process |
+| `user-copy-test` | Valid same/cross-page read/write; null, low, kernel, noncanonical, overflow, second page missing, supervisor page, read-only output | valid pass; invalid returns controlled error without crash |
+
+Before VFS/initrd, release smoke uses embedded static ELF bytes. Replace its
+provider with initrd/VFS in 0.0.10. No filesystem support is implied.
+
+## 31. Security threat review
+
+| Threat | Required control |
+|---|---|
+| stale ProcessId, generation wrap, slot reuse, stale parent | bounds + generation + checked increment + retired slot; parent is ProcessId |
+| PID confusion | monotonic PID for display; never internal authority |
+| kernel mapping accidentally USER | check effective USER through every page-table level in every root |
+| A sees B memory, wrong CR3 or missing kernel map | same-VA/different-frame runtime test, switch-plan checks and mapping audit |
+| page-table frame aliasing | AddressSpace ownership/uniqueness checks |
+| user W+X or stale BSS/page data | W^X validation and zero before USER publication |
+| wrong/stale RSP0, cross-process stack, user-accessible kernel stack | selected task top, IF-clear update, supervisor RW/NX mapping and guards |
+| user-copy overflow, noncanonical, cross-page hole, kernel pointer, RO destination | checked range and every-page effective permissions; chunk copies via kernel map |
+| mapping race during copy | immutable Alive mappings/no threads/no SMP now; pin/lock/fault-safe copy later |
+| malformed ELF and entry abuse | checked decode/arithmetic, strict allowlist, validate before publish |
+| lock held across switch; Zombie scheduled; wrong task/root | build switch plan while locked, release before EOI/CR3/RSP, assert state |
+| exit while executing | two-phase stack handoff; no early stack/root reclamation |
+| CPL3 fault treated fatal or CPL0 contained | classify saved CS; CPL0 fatal, user fault scalar capture and nonreturning handoff |
+| dead RIP resumed or user memory read for fault report | scheduler handoff never returns; report trusted hardware scalars only |
+
+**Implementation gate:** dynamic boot mappings have no repository-owned
+manifest. Section 17's runtime audit and root-clone verification are
+mandatory; do not schedule userspace if they cannot prove shared mappings.
+
+## 32. Explicit non-goals
+
+No VFS, initrd, filesystem, `/bin/init`, FDs, fork, general exec/spawn syscall,
+dynamic linker, shared libraries, PT_INTERP, PIE/ASLR unless reconsidered,
+userspace multithreading API, signals, pipes, PTY, shared memory, general
+IPC, user heap, brk, mmap, demand paging, COW, swap, general frame reclamation,
+block/storage stack, networking, users/groups/security database, capability
+manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
+
+## 33. Future compatibility
+
+| Future work | Compatibility reason |
+|---|---|
+| multithreaded process | ProcessId/address space independent of per-thread TaskId and kernel stack |
+| System Monitor | stable snapshot, PID, ticks and mapped-page count |
+| Service Manager / PID 1 | generation-safe parent links can be reassigned for orphans |
+| wait/reap syscall | Zombie retains result until internal reap |
+| VFS/FDs 0.0.10 | resource domain is process-owned, scheduler stays unaware |
+| resource handles/capabilities | opaque IDs and narrow ABI keep pointers/internals out of userspace |
+| shared memory/IPC | mapping ownership can later represent shared references |
+| frame reclamation | ownership metadata exists although allocator remains monotonic |
+| SMP | explicit per-task ownership helps, but locks/TLB shootdowns/AP bring-up must change |
+
+## 34. Implementation phases
+
+1. **A:** ProcessId, checked monotonic PID, lifecycle, bounded table, snapshots.
+2. **B:** mapping inventory/audit, inactive-root AddressSpace construction, kernel mapping clone; fail boot if invariant is unproven.
+3. **C:** per-task kernel stack and checked RSP0 update; user stack layout.
+4. **D:** hostile-input ELF validation, mapping permissions and zeroing.
+5. **E:** TaskKind/process handle, kernel stack top and synthetic CPL3 context (not yet runnable).
+6. **F:** CR3 switch backend and lock-free SwitchPlan handoff; kernel/user root transition tests.
+7. **G:** CPL3 timer preemption for all transition cases.
+8. **H:** non-preemptible getpid/exit syscall path and two-phase exit.
+9. **I:** checked page-chunk user-copy and negative pointer tests.
+10. **J:** exception scheduler handoff, fault containment, Zombie and internal reap.
+11. **K:** accounting and deterministic QEMU scenarios.
+12. **L:** security review of mappings, transitions, locks, ownership and capacity.
+13. **M:** separate implementation PR and review.
+14. **N:** formal pre-release audit.
+15. **O:** RC, published-artifact verification, then stable only after review.
+
+Mapping audit precedes CR3 work; exception handoff precedes fault containment.
+These dependencies avoid assuming the difficult part is just loading ELF.
+
+## 35. Open questions / blockers
+
+No stable scheduler contradiction blocks this design. These are mandatory
+implementation gates:
+
+* Dynamic bootloader ranges are not recorded. Inspect actual PML4 mappings
+  and prove every live kernel dependency is preserved supervisor-only before
+  activating another root. If any needed mapping conflicts with user ranges,
+  relocation or explicit reconstruction is required; otherwise CR3 execution
+  is blocked.
+* Current paging API mutates only active root. Inactive root construction,
+  physical access and frame ownership must be added before process creation.
+* Current Rust exception handlers are fatal/returning, not scheduler exits.
+  A non-returning user-fault handoff is required before claiming containment.
+* Eight process slots do not imply eight simultaneous processes: the current
+  eight task slots are shared with kernel tasks. Preserve this bound initially
+  and test mixed occupancy.
+
+No stable ABI is promised for 0.0.9. Embedded smoke ELF and ABI details need
+implementation review.
