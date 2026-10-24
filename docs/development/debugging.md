@@ -111,7 +111,6 @@ incomplete for this release.
 
 On WSL2 with WSLg, GTK-based display windows (including QEMU's `gtk`
 display) can render incorrectly or fail to appear under Wayland. The runner
-sets `GDK_BACKEND=x11` when launching QEMU to force GTK to use WSLg's X11
-compatibility layer. This is applied unconditionally by the runner; it is a
-no-op on systems where GTK does not use the Wayland backend, so it does not
-need to be removed on native Linux.
+does not force a GTK backend; QEMU/GTK selects the display backend for the
+host platform. If a WSLg display issue occurs, configure the GTK backend in
+the host environment before launching the runner.
