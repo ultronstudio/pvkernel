@@ -6,6 +6,10 @@
 *.img
 *.iso
 
+# Python bytecode (scripts/ policy checker and its tests)
+__pycache__/
+*.pyc
+
 # System files
 .DS_Store
 Thumbs.db

@@ -1,0 +1,52 @@
+name: Security triage
+
+# Deterministic validation of the security-policy files (Copilot
+# instructions/agent/prompt, the private vulnerability report form, and the
+# security docs), plus a guard that no workflow can publish an advisory,
+# request a CVE, or open a public issue. This is repository infrastructure,
+# not a vulnerability detector: dependency and code scanning stay in
+# security.yml. See docs/security/security-triage.md.
+#
+# Intentionally has no `paths:` filter, so it reports a result on every pull
+# request and can be registered as a required status check without blocking
+# unrelated PRs on a check that never ran.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only, no secrets. Never `pull_request_target`: this job runs the
+# scripts from the pull request's own checkout.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-triage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy-files:
+    name: Security policy files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ensure PyYAML is available
+        # Normally already present on GitHub-hosted Ubuntu runners; the
+        # distribution package is installed only if it is missing.
+        run: |
+          python3 -c 'import yaml' 2>/dev/null \
+            || sudo apt-get install -y --no-install-recommends python3-yaml
+
+      - name: Test the policy checker
+        run: python3 -I -m unittest discover -s scripts/tests -v
+
+      - name: Validate security-policy files
+        # Prints only fixed messages and sanitized paths, never file
+        # contents, and appends a static summary to the job summary.
+        run: python3 -I scripts/check_security_policy.py .

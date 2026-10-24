@@ -43,3 +43,5 @@ Closes #
 * [ ] Documentation is updated (when relevant)
 * [ ] `CHANGELOG.md` is updated (when relevant)
 * [ ] No secrets or generated build artifacts are committed
+* [ ] No exploit details for an unreleased vulnerability are included
+      (use private vulnerability reporting; see `SECURITY.md`)

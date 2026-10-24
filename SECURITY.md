@@ -2,7 +2,9 @@
 
 See also [docs/security/vulnerability-management.md](docs/security/vulnerability-management.md)
 for the internal `PVK-YYYY-NNNN` tracking scheme, the finding lifecycle,
-and the AI-assisted security policy, and
+and the AI-assisted security policy,
+[docs/security/security-triage.md](docs/security/security-triage.md) for how
+reports are triaged, and
 [docs/security/release-policy.md](docs/security/release-policy.md) for how
 a fix reaches a security release.
 
@@ -33,17 +35,22 @@ Security fixes are generally not backported to older development releases.
 ## Reporting a Vulnerability
 
 Please do **not** report security vulnerabilities through public GitHub issues,
-pull requests, discussions, or other public channels.
+pull requests, pull-request review comments, discussions, or other public
+channels, and do not post unreleased exploit details there.
 
 Use one of the following private reporting methods:
 
-1. Submit a private vulnerability report through GitHub:
+1. Submit a private vulnerability report through GitHub (Private
+   Vulnerability Reporting, the preferred channel):
    https://github.com/ultronstudio/pvkernel/security/advisories/new
 
 2. If private vulnerability reporting is unavailable, contact:
    kontakt@petrvurm.cz
 
-Please include as much of the following information as possible:
+The GitHub form is structured and asks for the information below. A safe
+reproducer or a clear description is enough; you do not need to provide a
+weaponized exploit or a CVSS score. A suggested CWE is welcome if you know
+it.
 
 * a clear description of the vulnerability;
 * the affected pvKernel version or commit;
@@ -56,6 +63,15 @@ Please include as much of the following information as possible:
 
 Do not include secrets, personal data, or information belonging to third
 parties unless it is strictly necessary for understanding the report.
+
+### Security reports versus ordinary bugs
+
+An ordinary bug (incorrect behavior with no security impact) belongs in a
+normal public issue. A suspected vulnerability is one where an attacker can
+cross a security boundary, such as userspace to kernel or process to
+process, or read or write memory they should not. If you are unsure, report
+privately: maintainers can reclassify a report as an ordinary bug and
+move it to a public issue with your agreement.
 
 ## Response Process
 
@@ -80,6 +96,12 @@ When appropriate, a fix may be published together with:
 * a description of affected versions;
 * mitigation or upgrade instructions;
 * acknowledgement of the reporter.
+
+Maintainers decide when a GitHub Security Advisory (GHSA) is appropriate;
+it is not created for every report. Whether a CVE is requested is
+evaluated separately, after the issue is confirmed and a fix and
+disclosure plan exist; a GHSA can exist without a CVE. See
+[docs/security/vulnerability-management.md](docs/security/vulnerability-management.md).
 
 Reporters will be credited unless they request anonymity.
 
