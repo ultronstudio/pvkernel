@@ -674,6 +674,46 @@ pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
     bytes
 }
 
+/// Builds one small ELF fixture whose entry triggers a requested hardware
+/// exception immediately. Used only to validate CPL3 fault containment.
+#[cfg(feature = "user-fault-containment-test")]
+pub(crate) fn process_fault_elf(vector: u8) -> alloc::vec::Vec<u8> {
+    const ENTRY: u64 = 0x0040_0000;
+    const FILE_OFFSET: usize = 0x1000;
+    let code: &[u8] = match vector {
+        6 => &[0x0F, 0x0B],        // UD2
+        13 => &[0x0F, 0x20, 0xC0], // MOV RAX, CR0: privileged at CPL3
+        14 => &[
+            // read from a canonical but unmapped user VA
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, // MOV RAX, 0x30000000
+            0x48, 0x8B, 0x00, // MOV RAX, [RAX]
+        ],
+        _ => panic!("unsupported process fault fixture vector"),
+    };
+
+    let mut bytes = alloc::vec![0; FILE_OFFSET + code.len()];
+    bytes[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
+    put_u16(&mut bytes, 16, 2);
+    put_u16(&mut bytes, 18, 62);
+    put_u32(&mut bytes, 20, 1);
+    put_u64(&mut bytes, 24, ENTRY);
+    put_u64(&mut bytes, 32, ELF_HEADER_SIZE as u64);
+    put_u16(&mut bytes, 52, ELF_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 54, PROGRAM_HEADER_SIZE as u16);
+    put_u16(&mut bytes, 56, 1);
+    test_load_header(
+        &mut bytes,
+        64,
+        PF_R | PF_X,
+        FILE_OFFSET as u64,
+        ENTRY,
+        code.len() as u64,
+        code.len() as u64,
+    );
+    bytes[FILE_OFFSET..].copy_from_slice(code);
+    bytes
+}
+
 #[cfg(feature = "qemu-test")]
 fn test_load_header(
     bytes: &mut [u8],

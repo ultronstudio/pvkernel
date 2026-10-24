@@ -18,6 +18,17 @@ use crate::{
 
 #[cfg(all(feature = "process-preemption-test", feature = "process-smoke-test"))]
 compile_error!("process-preemption-test and process-smoke-test are separate QEMU scenarios");
+#[cfg(any(
+    all(
+        feature = "user-fault-containment-test",
+        feature = "process-preemption-test"
+    ),
+    all(
+        feature = "user-fault-containment-test",
+        feature = "process-smoke-test"
+    )
+))]
+compile_error!("process fault containment has a dedicated QEMU scenario");
 
 pub const MAX_KERNEL_TASKS: usize = arch_task::MAX_KERNEL_TASKS;
 pub type KernelTaskEntry = fn();
@@ -168,6 +179,8 @@ static PROCESS_SMOKE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PROCESS_SMOKE_START_TICK: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "process-smoke-test")]
 static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
+#[cfg(feature = "user-fault-containment-test")]
+static USER_FAULT_IDS: Once<[ProcessId; 3]> = Once::new();
 static SMOKE_A: AtomicU64 = AtomicU64::new(0);
 static SMOKE_B: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A_SP: AtomicU64 = AtomicU64::new(0);
@@ -748,6 +761,26 @@ pub(crate) fn current_user_process_id() -> Option<ProcessId> {
 /// scheduler -> process lock order, then both locks are released before the
 /// explicit STI;HLT scheduler handoff. This function never returns to CPL3.
 pub(crate) fn exit_current_user(status: i32) -> ! {
+    terminate_current_user(ProcessExitReason::Exited { status });
+}
+
+/// Contains a hardware exception raised by a process Task. The handler passes
+/// only scalar CPU state, captured before this function is entered.
+pub(crate) fn terminate_current_user_fault(
+    vector: u8,
+    error_code: Option<u64>,
+    fault_address: Option<u64>,
+    rip: u64,
+) -> ! {
+    terminate_current_user(ProcessExitReason::Fault {
+        vector,
+        error_code,
+        fault_address,
+        rip,
+    });
+}
+
+fn terminate_current_user(reason: ProcessExitReason) -> ! {
     let scheduler = SCHEDULER
         .get()
         .expect("process exit before scheduler initialization");
@@ -772,12 +805,8 @@ pub(crate) fn exit_current_user(status: i32) -> ! {
         let TaskKind::User(process_id) = slot.kind else {
             panic!("kernel Task attempted userspace exit syscall")
         };
-        process::begin_exit(
-            process_id,
-            ProcessExitReason::Exited { status },
-            pit::ticks(),
-        )
-        .expect("current process could not transition to Exiting");
+        process::begin_exit(process_id, reason, pit::ticks())
+            .expect("current process could not transition to Exiting");
         slot.state = TaskState::Exiting;
     });
     loop {
@@ -927,6 +956,111 @@ pub fn prepare_process_smoke_test() {
     PROCESS_SMOKE_START_TICK.store(pit::ticks(), Ordering::Relaxed);
     PROCESS_SMOKE_ACTIVE.store(true, Ordering::Release);
     kprintln!("[process-test] embedded ELF prepared for PID {pid}");
+}
+
+#[cfg(feature = "user-fault-containment-test")]
+pub fn prepare_user_fault_containment_test() {
+    let mut ids = [None; 3];
+    for (index, vector) in [14u8, 13, 6].into_iter().enumerate() {
+        let name = match vector {
+            14 => "fault-pf",
+            13 => "fault-gp",
+            6 => "fault-ud",
+            _ => unreachable!(),
+        };
+        let process_id = process::reserve(None, name, pit::ticks())
+            .expect("failed to reserve fault-containment process");
+        let image = process::elf::process_fault_elf(vector);
+        let (address_space, context) =
+            crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+                let mut address_space = kernel
+                    .create_address_space()
+                    .expect("failed to create fault-containment AddressSpace");
+                crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                    .expect("failed to map fault-containment user stack");
+                let image = process::elf::load_static_elf(&mut address_space, kernel, &image)
+                    .expect("fault-containment ELF fixture rejected");
+                let context = address_space
+                    .validate_user_context(
+                        kernel,
+                        image.entry,
+                        crate::arch::x86_64::memory::USER_STACK_TOP,
+                    )
+                    .expect("fault-containment context invalid");
+                (address_space, context)
+            });
+        process::install_address_space(process_id, address_space)
+            .expect("could not attach fault-containment address space");
+        let task_id = prepare_user_task(process_id, context)
+            .expect("could not prepare fault-containment task");
+        process::install_primary_task(process_id, task_id)
+            .expect("could not attach fault-containment task");
+        publish_prepared_user_task(task_id).expect("could not publish fault-containment process");
+        ids[index] = Some(process_id);
+        kprintln!("[process-test] prepared CPL3 fault fixture vector {vector}");
+    }
+    USER_FAULT_IDS.call_once(|| ids.map(|id| id.expect("fault fixture ID missing")));
+}
+
+#[cfg(feature = "user-fault-containment-test")]
+pub fn wait_for_user_fault_containment_test() {
+    let ids = USER_FAULT_IDS
+        .get()
+        .expect("fault-containment process IDs were not initialized");
+    let start_tick = pit::ticks();
+    loop {
+        let mut zombies = 0;
+        for (process_id, expected_vector) in ids.iter().zip([14u8, 13, 6]) {
+            let snapshot = process::snapshot(*process_id)
+                .expect("fault-containment process identity became stale before reap");
+            if snapshot.state == process::ProcessState::Zombie {
+                let reason = snapshot
+                    .exit_reason
+                    .expect("faulting process Zombie lost fault metadata");
+                match reason {
+                    ProcessExitReason::Fault {
+                        vector,
+                        error_code,
+                        fault_address,
+                        rip,
+                    } => {
+                        assert_eq!(vector, expected_vector);
+                        assert!(rip >= 0x0040_0000 && rip < 0x0040_1000);
+                        match expected_vector {
+                            14 => {
+                                assert!(error_code.is_some());
+                                assert_eq!(fault_address, Some(0x3000_0000));
+                            }
+                            13 => {
+                                assert!(error_code.is_some());
+                                assert_eq!(fault_address, None);
+                            }
+                            6 => {
+                                assert_eq!(error_code, None);
+                                assert_eq!(fault_address, None);
+                            }
+                            _ => unreachable!(),
+                        }
+                        zombies += 1;
+                    }
+                    other => panic!("fault fixture exited normally: {other:?}"),
+                }
+            }
+        }
+        if zombies == ids.len() {
+            for process_id in ids {
+                process::reap(*process_id).expect("could not reap faulting Zombie");
+                assert!(process::snapshot(*process_id).is_err());
+            }
+            kprintln!("[process-test] #PF/#GP/#UD metadata and Zombie handoff passed");
+            crate::arch::x86_64::qemu::exit_success();
+        }
+        if pit::ticks().saturating_sub(start_tick) >= 100 {
+            kprintln!("[process-test] user-fault tick watchdog expired");
+            crate::arch::x86_64::qemu::exit_failure();
+        }
+        hlt();
+    }
 }
 
 #[cfg(feature = "process-smoke-test")]

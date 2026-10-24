@@ -14,7 +14,7 @@ Phase H adds process-aware `getpid` and terminal `exit`, with deferred Zombie
 publication after the outgoing kernel stack becomes inactive; an embedded
 ELF smoke checks PID identity and non-returning exit. Phase I adds central
 page-chunked `copy_from_user`/`copy_to_user` APIs with full-range preflight;
-the dedicated QEMU test covers same/cross-page copies and hostile ranges.
+the dedicated QEMU test covers same/cross-page copies and hostile ranges. Phase J routes CPL3 #PF/#GP/#UD from process Tasks into the terminal exit handoff and defers Zombie publication until a later PIT runs on an adopted stack; its QEMU scenario observes all three faults and reaps their Zombies.
 
 ## 1. Scope and goals
 
@@ -309,28 +309,18 @@ memory to report a fault.
 
 ## 15. Fault containment
 
-Current #UD, #GP and #PF handlers log and invoke global fatal handling.
-#GP/#PF report saved CS privilege; #PF reads CR2 and error bits. Expected
-user-fault QEMU tests exit the test successfully, not contain a process.
-
-Later, classify by interrupted frame's saved CS RPL: CPL0 fault remains
-kernel-fatal; CPL3 #PF/#GP/#UD records structured metadata and transitions
-that process to Exiting. PF USER_MODE is a useful consistency check, not the
-only classifier. #UD has no error code, #GP has one, and #PF also records
-CR2. Existing Rust interrupt handlers return through the faulting frame or
-halt the kernel. They cannot safely mark a process dead and return. Add a
-common non-returning exception-to-scheduler handoff that captures the frame,
-marks Process and Task Exiting, and releases all locks while IF remains
-clear. Only after that state is safe may the terminal handoff deliberately
-enable maskable timer progress (for this single-core PIT design, a loop
-equivalent to the proven `sti; hlt` task-exit wait). The next timer interrupt
-must save the exiting context and select away; it must never requeue or
-return to the faulting RIP. Do not reuse the outgoing kernel stack while
-the timer/assembly path is still executing on it. Record pending Zombie
-completion at scheduling time, but finalize Zombie only from a post-stack-
-adoption hook or continuation on the selected task's stack, after the old
-stack is inactive. No process or scheduler lock crosses this handoff.
-
+Exception classification uses saved CS RPL as the primary source. CPL0
+faults retain existing kernel-fatal behavior. CPL3 #UD/#GP/#PF from a
+process-owned Running Task capture only vector, optional hardware error code,
+CR2 for #PF, and saved RIP. #PF USER_MODE remains consistency information,
+not the sole classifier. The handler calls the common non-returning terminal
+handoff while IF is clear; it marks Process and Task Exiting and releases all
+locks before the `sti; hlt`-equivalent wait permits PIT delivery. Timer saves
+the CPL0 handoff context on that process's kernel stack, selects another
+context, and never restores the faulting user frame. Zombie is finalized on a
+later PIT after a different stack has been adopted. The QEMU scenario runs
+separate #PF/#GP/#UD processes, checks their scalar metadata and Zombie
+states, then reaps them while the kernel continues.
 ## 16. AddressSpace and frame ownership
 
 Create an owned `AddressSpace` abstraction around a root PML4 frame and

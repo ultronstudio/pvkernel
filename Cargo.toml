@@ -59,6 +59,7 @@ scheduler-preemption-test = ["kernel/scheduler-preemption-test"]
 process-preemption-test = ["kernel/process-preemption-test"]
 process-smoke-test = ["kernel/process-smoke-test"]
 user-copy-test = ["kernel/user-copy-test"]
+user-fault-containment-test = ["kernel/user-fault-containment-test"]
 task-stack-guard-fault-test = ["kernel/task-stack-guard-fault-test"]
 task-capacity-test = ["kernel/task-capacity-test"]
 
