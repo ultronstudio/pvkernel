@@ -17,7 +17,9 @@
 //! executables, and does not define a stable syscall ABI.
 
 mod address_space;
+mod allocator;
 mod frame_allocator;
+mod heap;
 mod paging;
 
 #[cfg(feature = "qemu-test")]
@@ -162,6 +164,24 @@ pub fn init(boot_info: &'static mut BootInfo) {
             "unavailable"
         }
     );
+    heap::init();
+}
+
+/// Runs heap-backed `Box`, `Vec`, `String`, alignment, reuse, and
+/// fragmentation smoke tests after heap initialization.
+pub fn run_heap_smoke_tests() {
+    #[cfg(feature = "qemu-test")]
+    frame_allocator::run_cursor_regression_test();
+    heap::run_smoke_tests();
+}
+
+#[cfg(all(feature = "heap-guard-fault-test", feature = "qemu-test"))]
+pub(crate) fn take_expected_heap_guard_fault(
+    address: u64,
+    error_code: PageFaultErrorCode,
+    cpl: x86_64::PrivilegeLevel,
+) -> bool {
+    heap::take_expected_guard_fault(address, error_code, cpl)
 }
 
 /// Verifies the paging-mode precondition every later step in [`init`]

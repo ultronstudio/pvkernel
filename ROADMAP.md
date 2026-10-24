@@ -87,8 +87,16 @@ out of scope for this milestone and remain future roadmap items.
 
 ## 0.0.7 — Kernel Heap and Rust `alloc` Support
 
-* a kernel heap
-* Rust `alloc` support
+* stateful monotonic physical frame allocation
+* a fixed 1 MiB supervisor-only, writable, NX heap with unmapped guards
+* a first-fit free-list allocator with splitting, coalescing, and reuse
+* Rust `alloc` support for `Box`, `Vec`, and `String`
+* deterministic heap, OOM, and guard-page QEMU tests
+
+Physical backing frames remain owned by the heap for the kernel lifetime;
+freeing heap objects returns memory to the heap allocator, not the physical
+frame allocator. Dynamic heap growth and general physical-frame reclamation
+remain future work.
 
 ## 0.0.8 — Kernel Tasks and Scheduler
 

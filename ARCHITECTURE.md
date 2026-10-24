@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.6. It does not describe planned or aspirational architecture; see
+version 0.0.7. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
@@ -175,6 +175,19 @@ interrupts for the duration of the call. This mirrors the GDT/TSS and IDT's
 for the full design, including the safety invariants for reconstructing the
 active page table and the permission (W^X) model enforced by every mapping
 operation.
+
+## Kernel heap ownership (0.0.7)
+
+`arch::x86_64::memory::heap` maps the fixed 1 MiB heap after paging
+prerequisites and the active page table are validated. It verifies that
+every heap page and both adjacent guard pages were unmapped, creates
+supervisor-only writable NX mappings, verifies representative permissions,
+then initializes the `#[global_allocator]`. Its first-fit free list reuses
+and coalesces heap object storage. Backing physical frames remain owned by
+the heap for the kernel lifetime and are not reclaimed by `Box`, `Vec`, or
+`String` deallocation. See
+[docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
+for the layout and safety invariants.
 
 ## Syscall and userspace entry ownership (0.0.6)
 

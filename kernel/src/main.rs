@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 mod arch;
 mod drivers;
@@ -9,6 +12,7 @@ mod halt;
 
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
+use core::alloc::Layout;
 use core::panic::PanicInfo;
 
 use arch::x86_64::pic::{self, IrqLine};
@@ -75,6 +79,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::init(boot_info);
 
     arch::x86_64::memory::run_boot_smoke_test();
+    arch::x86_64::memory::run_heap_smoke_tests();
 
     if let Some(framebuffer) = framebuffer.as_mut() {
         let info = framebuffer.info();
@@ -152,6 +157,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         #[cfg(not(feature = "qemu-test"))]
         idle_loop();
     }
+}
+
+#[alloc_error_handler]
+fn alloc_error(layout: Layout) -> ! {
+    kprintln!(
+        "[heap] allocation failed: size={} align={}",
+        layout.size(),
+        layout.align()
+    );
+    #[cfg(feature = "qemu-test")]
+    arch::x86_64::qemu::exit_failure();
+    #[cfg(not(feature = "qemu-test"))]
+    halt_forever()
 }
 
 #[panic_handler]

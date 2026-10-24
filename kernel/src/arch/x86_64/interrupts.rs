@@ -325,6 +325,16 @@ extern "x86-interrupt" fn page_fault_handler(
         qemu::exit_success();
     }
 
+    #[cfg(all(feature = "qemu-test", feature = "heap-guard-fault-test"))]
+    if memory::take_expected_heap_guard_fault(faulting_address, error_code, cpl) {
+        kprintln!("[exception] page fault");
+        kprintln!("faulting address (CR2): {:#x}", faulting_address);
+        kprintln!("origin: CPL{}", cpl as u8);
+        kprintln!("error code: {:?}", error_code);
+        kprintln!("[heap-test] expected heap guard-page fault matched");
+        qemu::exit_success();
+    }
+
     #[cfg(feature = "qemu-test")]
     if EXPECTED_PAGE_FAULT.load(Ordering::Relaxed)
         && faulting_address == EXPECTED_PAGE_FAULT_ADDRESS.load(Ordering::Relaxed)
