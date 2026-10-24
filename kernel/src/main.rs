@@ -94,6 +94,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::memory::run_heap_smoke_tests();
     task::init();
     process::init();
+    #[cfg(feature = "qemu-test")]
+    arch::x86_64::memory::run_address_space_smoke_test();
 
     if let Some(framebuffer) = framebuffer.as_mut() {
         let info = framebuffer.info();

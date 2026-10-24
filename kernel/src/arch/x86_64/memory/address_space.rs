@@ -1,12 +1,11 @@
 //! Ownership of the active x86_64 page table and the boot frame allocator.
 //!
-//! There is exactly one [`KernelAddressSpace`] for the whole kernel in this
-//! milestone (pvKernel 0.0.5 does not create per-process address spaces).
-//! It is built once during [`super::init`] and afterward is only reachable
-//! through [`with_kernel_address_space`], which serializes access behind a
+//! The single [`KernelAddressSpace`] owns the kernel root and allocator. It
+//! is built once during [`super::init`] and afterward is reachable through
+//! [`with_kernel_address_space`], which serializes access behind a
 //! [`spin::Mutex`] and disables maskable interrupts for the duration of the
-//! call. This keeps a single owner of the mapper at all times: no code path
-//! can obtain two simultaneous mutable references to the page tables.
+//! call. Process [`AddressSpace`] values own inactive roots whose audited
+//! upper-half subtrees are shared with the kernel root.
 
 use spin::{Mutex, Once};
 use x86_64::{
@@ -42,6 +41,205 @@ pub(super) struct BootMappingInventory {
     pub(super) ramdisk: Option<MappingRange>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressSpaceError {
+    FrameAllocationFailed,
+    InvalidRoot,
+    UnsafeKernelMapping,
+    KernelMappingMissing,
+    OutsideUserRange,
+    NonUserPermissions,
+    UserPageAlreadyMapped,
+    UserPageNotMapped,
+    Mapping(MemoryError),
+    AccountingOverflow,
+    InvalidCopyRange,
+}
+
+impl From<MemoryError> for AddressSpaceError {
+    fn from(error: MemoryError) -> Self {
+        Self::Mapping(error)
+    }
+}
+
+/// One independent four-level root. Its lower-half page tables and user
+/// frames are process-owned; audited upper-half kernel PML4 entries share the
+/// kernel's supervisor-only subtrees. Frames remain monotonic/kernel-lifetime
+/// owned until general reclamation exists.
+pub struct AddressSpace {
+    root: PhysFrame<Size4KiB>,
+    mapped_user_pages: u64,
+}
+
+impl AddressSpace {
+    pub const fn mapped_user_pages(&self) -> u64 {
+        self.mapped_user_pages
+    }
+
+    pub(crate) fn root_frame(&self) -> PhysFrame<Size4KiB> {
+        self.root
+    }
+
+    pub fn map_new_user_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+        permissions: Permissions,
+    ) -> Result<PhysFrame<Size4KiB>, AddressSpaceError> {
+        validate_user_page(page, permissions)?;
+        if !matches!(
+            self.translate(kernel, page.start_address())?,
+            Translation::NotMapped
+        ) {
+            return Err(AddressSpaceError::UserPageAlreadyMapped);
+        }
+        let next_count = self
+            .mapped_user_pages
+            .checked_add(1)
+            .ok_or(AddressSpaceError::AccountingOverflow)?;
+        let frame = kernel.allocate_zeroed_frame()?;
+        kernel.with_inactive_mapper(self, |mapper, allocator| {
+            paging::map_page(mapper, allocator, page, frame, permissions)
+        })?;
+        self.mapped_user_pages = next_count;
+        match self.translate(kernel, page.start_address())? {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE) =>
+            {
+                Ok(frame)
+            }
+            _ => {
+                let _ = self.unmap_user_page(kernel, page);
+                Err(AddressSpaceError::NonUserPermissions)
+            }
+        }
+    }
+
+    pub fn update_user_permissions(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+        permissions: Permissions,
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_page(page, permissions)?;
+        match self.translate(kernel, page.start_address())? {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE) => {}
+            _ => return Err(AddressSpaceError::UserPageNotMapped),
+        }
+        kernel.with_inactive_mapper(self, |mapper, _| {
+            paging::update_permissions(mapper, page, permissions)
+        })?;
+        Ok(())
+    }
+
+    /// Copies into one already-mapped, writable user page through the
+    /// supervisor physical map. Callers split multi-page data into page
+    /// chunks and keep the process Creating until initialization is complete.
+    pub fn write_user_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_address(page.start_address())?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        if end > Size4KiB::SIZE as usize {
+            return Err(AddressSpaceError::InvalidCopyRange);
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let virtual_address = page
+            .start_address()
+            .as_u64()
+            .checked_add(offset as u64)
+            .ok_or(AddressSpaceError::InvalidCopyRange)?;
+        let physical = match self.translate(kernel, VirtAddr::new(virtual_address))? {
+            Translation::Mapped { phys_addr, flags }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && flags.contains(PageTableFlags::WRITABLE) =>
+            {
+                phys_addr
+            }
+            _ => return Err(AddressSpaceError::UserPageNotMapped),
+        };
+        let target = kernel.physical_alias(physical)?;
+        // SAFETY: the destination PTE belongs to this inactive AddressSpace,
+        // was checked user-accessible and writable above, and the matching
+        // physical frame is mapped supervisor-only through the audited
+        // physical map. The input slice is valid for `bytes.len()`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), target.as_mut_ptr::<u8>(), bytes.len());
+        }
+        Ok(())
+    }
+
+    pub fn unmap_user_page(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        page: Page<Size4KiB>,
+    ) -> Result<PhysFrame<Size4KiB>, AddressSpaceError> {
+        validate_user_address(page.start_address())?;
+        let next_count = self
+            .mapped_user_pages
+            .checked_sub(1)
+            .ok_or(AddressSpaceError::AccountingOverflow)?;
+        match self.translate(kernel, page.start_address())? {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE) => {}
+            _ => return Err(AddressSpaceError::UserPageNotMapped),
+        }
+        let frame =
+            kernel.with_inactive_mapper(self, |mapper, _| paging::unmap_page(mapper, page))?;
+        self.mapped_user_pages = next_count;
+        Ok(frame)
+    }
+
+    pub fn translate(
+        &mut self,
+        kernel: &mut KernelAddressSpace,
+        address: VirtAddr,
+    ) -> Result<Translation, AddressSpaceError> {
+        if VirtAddr::try_new(address.as_u64()).is_err() {
+            return Err(AddressSpaceError::Mapping(MemoryError::NonCanonicalAddress));
+        }
+        kernel.with_inactive_mapper(self, |mapper, _| Ok(paging::translate(mapper, address)))
+    }
+}
+
+fn validate_user_address(address: VirtAddr) -> Result<(), AddressSpaceError> {
+    if address.as_u64() < super::USER_MIN || address.as_u64() >= super::USER_MAX {
+        return Err(AddressSpaceError::OutsideUserRange);
+    }
+    Ok(())
+}
+
+fn validate_user_page(
+    page: Page<Size4KiB>,
+    permissions: Permissions,
+) -> Result<(), AddressSpaceError> {
+    validate_user_address(page.start_address())?;
+    let end = page
+        .start_address()
+        .as_u64()
+        .checked_add(Size4KiB::SIZE)
+        .ok_or(AddressSpaceError::OutsideUserRange)?;
+    if end > super::USER_MAX {
+        return Err(AddressSpaceError::OutsideUserRange);
+    }
+    if !permissions.user_accessible {
+        return Err(AddressSpaceError::NonUserPermissions);
+    }
+    if permissions.writable && permissions.executable {
+        return Err(AddressSpaceError::Mapping(MemoryError::InvalidPermissions));
+    }
+    Ok(())
+}
+
 /// The kernel's active page-table mapper plus the boot-time physical frame
 /// allocator, held behind one lock so the two can never fall out of sync
 /// with each other.
@@ -50,9 +248,166 @@ pub struct KernelAddressSpace {
     frame_allocator: BootFrameAllocator,
     physical_memory_offset: VirtAddr,
     boot_mappings: BootMappingInventory,
+    kernel_root: PhysFrame<Size4KiB>,
+    boot_mapping_audited: bool,
 }
 
 impl KernelAddressSpace {
+    /// Creates an inactive address-space root by cloning the already-audited
+    /// supervisor-only upper half. Lower-half bootloader mappings are never
+    /// copied into a process root.
+    pub fn create_address_space(&mut self) -> Result<AddressSpace, AddressSpaceError> {
+        if !self.boot_mapping_audited {
+            return Err(AddressSpaceError::UnsafeKernelMapping);
+        }
+        self.verify_live_kernel_mappings()
+            .map_err(|_| AddressSpaceError::KernelMappingMissing)?;
+
+        let root_frame = self
+            .frame_allocator
+            .allocate_frame()
+            .ok_or(AddressSpaceError::FrameAllocationFailed)?;
+        let root_alias = self.physical_alias(root_frame.start_address())?;
+        // SAFETY: the allocated frame is uniquely owned by the monotonic
+        // allocator, its complete page is reachable through the audited
+        // supervisor physical map, and no other reference to this new root
+        // exists. The closure is IRQ-masked by with_kernel_address_space.
+        unsafe {
+            core::ptr::write_bytes(root_alias.as_mut_ptr::<u8>(), 0, Size4KiB::SIZE as usize)
+        };
+
+        let kernel_root_alias = self.physical_alias(self.kernel_root.start_address())?;
+        // SAFETY: kernel_root is the active root captured at initialization;
+        // physical_alias proved its mapped supervisor alias. This immutable
+        // reference is used only while the address-space lock is held.
+        let kernel_root = unsafe { &*kernel_root_alias.as_ptr::<PageTable>() };
+        // SAFETY: root_frame is fresh, zeroed, and not active; it has no other
+        // references. The mutable reference is scoped to this operation.
+        let process_root = unsafe { &mut *root_alias.as_mut_ptr::<PageTable>() };
+        for index in 256..512 {
+            let entry = &kernel_root[index];
+            if !entry.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+                return Err(AddressSpaceError::UnsafeKernelMapping);
+            }
+            process_root[index] = entry.clone();
+        }
+        Ok(AddressSpace {
+            root: root_frame,
+            mapped_user_pages: 0,
+        })
+    }
+
+    pub(super) fn physical_alias(&self, physical: PhysAddr) -> Result<VirtAddr, AddressSpaceError> {
+        let virtual_address = self
+            .physical_memory_offset
+            .as_u64()
+            .checked_add(physical.as_u64())
+            .ok_or(AddressSpaceError::InvalidRoot)?;
+        let alias =
+            VirtAddr::try_new(virtual_address).map_err(|_| AddressSpaceError::InvalidRoot)?;
+        self.verify_kernel_root_mapping(alias)?;
+        Ok(alias)
+    }
+
+    pub(super) fn verify_kernel_root_mapping(
+        &self,
+        address: VirtAddr,
+    ) -> Result<(), AddressSpaceError> {
+        match paging::translate(&self.mapper, address) {
+            Translation::Mapped { flags, .. }
+                if !flags.contains(PageTableFlags::USER_ACCESSIBLE) =>
+            {
+                Ok(())
+            }
+            // The audited bootloader physical map may use 2 MiB/1 GiB leaf
+            // mappings. Its upper-half tree was recursively checked for
+            // USER bits before this alias is accepted.
+            Translation::HugePage { .. } => Ok(()),
+            _ => Err(AddressSpaceError::UnsafeKernelMapping),
+        }
+    }
+
+    fn allocate_zeroed_frame(&mut self) -> Result<PhysFrame<Size4KiB>, AddressSpaceError> {
+        let frame = self
+            .frame_allocator
+            .allocate_frame()
+            .ok_or(AddressSpaceError::FrameAllocationFailed)?;
+        let alias = self.physical_alias(frame.start_address())?;
+        // SAFETY: the monotonic allocator uniquely returned this full frame;
+        // its physical-map alias was verified supervisor-mapped and no user
+        // mapping exposes it before initialization completes.
+        unsafe { core::ptr::write_bytes(alias.as_mut_ptr::<u8>(), 0, Size4KiB::SIZE as usize) };
+        Ok(frame)
+    }
+
+    fn with_inactive_mapper<R>(
+        &mut self,
+        address_space: &mut AddressSpace,
+        f: impl FnOnce(&mut OffsetPageTable<'_>, &mut BootFrameAllocator) -> Result<R, MemoryError>,
+    ) -> Result<R, AddressSpaceError> {
+        let alias = self.physical_alias(address_space.root.start_address())?;
+        // SAFETY: this AddressSpace exclusively owns its root frame, which
+        // is not loaded in CR3. The kernel address-space mutex serializes all
+        // page-table editing and interrupts are disabled, so this is the only
+        // mutable root reference and all child frames remain allocator-owned.
+        let root = unsafe { &mut *alias.as_mut_ptr::<PageTable>() };
+        // SAFETY: physical_memory_offset is the bootloader mapping audited at
+        // init and retained for kernel lifetime; `root` is the inactive root.
+        let mut mapper = unsafe { OffsetPageTable::new(root, self.physical_memory_offset) };
+        f(&mut mapper, &mut self.frame_allocator).map_err(AddressSpaceError::from)
+    }
+
+    fn verify_live_kernel_mappings(&self) -> Result<(), &'static str> {
+        self.audit_upper_pml4()?;
+        let heap_end = super::heap::HEAP_END;
+        let mut address = super::heap::HEAP_START;
+        while address < heap_end {
+            self.verify_kernel_rw_nx(address)?;
+            address = address
+                .checked_add(Size4KiB::SIZE)
+                .ok_or("heap range overflow")?;
+        }
+        for slot in 0..crate::arch::x86_64::task::MAX_KERNEL_TASKS {
+            let (low, high) =
+                crate::arch::x86_64::task::stack_bounds(slot).ok_or("invalid task stack slot")?;
+            let mut address = low;
+            while address < high {
+                self.verify_kernel_rw_nx(address)?;
+                address = address
+                    .checked_add(Size4KiB::SIZE)
+                    .ok_or("task stack range overflow")?;
+            }
+            for guard in [
+                low.checked_sub(Size4KiB::SIZE)
+                    .ok_or("task stack guard underflow")?,
+                high,
+            ] {
+                if !matches!(
+                    paging::translate(&self.mapper, VirtAddr::new(guard)),
+                    Translation::NotMapped
+                ) {
+                    return Err("task stack guard unexpectedly mapped");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_kernel_rw_nx(&self, address: u64) -> Result<(), &'static str> {
+        match paging::translate(&self.mapper, VirtAddr::new(address)) {
+            Translation::Mapped { flags, .. }
+                if flags.contains(PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE)
+                    && !flags.contains(PageTableFlags::USER_ACCESSIBLE) =>
+            {
+                Ok(())
+            }
+            _ => Err("kernel heap/task stack is not supervisor RW/NX"),
+        }
+    }
+
     fn verify_boot_mapping_policy(&self) -> Result<(), &'static str> {
         let required = [
             ("kernel stack", Some(self.boot_mappings.kernel_stack)),
@@ -375,6 +730,18 @@ impl KernelAddressSpace {
         page: Page<Size4KiB>,
         permissions: Permissions,
     ) -> Result<PhysFrame<Size4KiB>, MemoryError> {
+        if permissions.user_accessible {
+            let start = page.start_address().as_u64();
+            let end = start
+                .checked_add(Size4KiB::SIZE)
+                .ok_or(MemoryError::NonCanonicalAddress)?;
+            if start < super::USER_MIN
+                || end > super::USER_MAX
+                || permissions.writable && permissions.executable
+            {
+                return Err(MemoryError::InvalidPermissions);
+            }
+        }
         let frame = self
             .frame_allocator
             .allocate_frame()
@@ -402,6 +769,18 @@ impl KernelAddressSpace {
         page: Page<Size4KiB>,
         permissions: Permissions,
     ) -> Result<(), MemoryError> {
+        if permissions.user_accessible {
+            let start = page.start_address().as_u64();
+            let end = start
+                .checked_add(Size4KiB::SIZE)
+                .ok_or(MemoryError::NonCanonicalAddress)?;
+            if start < super::USER_MIN
+                || end > super::USER_MAX
+                || permissions.writable && permissions.executable
+            {
+                return Err(MemoryError::InvalidPermissions);
+            }
+        }
         paging::update_permissions(&mut self.mapper, page, permissions)
     }
 
@@ -554,15 +933,19 @@ pub(super) fn init(
         // requires.
         let mapper = unsafe { OffsetPageTable::new(level_4_table, phys_mem_offset) };
 
-        let space = KernelAddressSpace {
+        let (kernel_root, _) = Cr3::read();
+        let mut space = KernelAddressSpace {
             mapper,
             frame_allocator,
             physical_memory_offset: phys_mem_offset,
             boot_mappings,
+            kernel_root,
+            boot_mapping_audited: false,
         };
         space
             .verify_boot_mapping_policy()
             .expect("runtime boot mapping audit failed; refusing process roots");
+        space.boot_mapping_audited = true;
         Mutex::new(space)
     });
 }
