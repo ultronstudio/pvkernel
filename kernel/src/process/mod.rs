@@ -66,6 +66,7 @@ impl ProcessName {
         })
     }
 
+    #[allow(dead_code)] // Process names are retained for future in-kernel snapshot consumers.
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len as usize])
             .expect("ProcessName bytes were validated at construction")
@@ -356,6 +357,7 @@ impl ProcessTable {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used by release process creation; QEMU-only builds omit that entry point.
     fn publish_created(&mut self, id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
         let slot = self.slot_for_mut(id)?;
         if slot.state != ProcessState::Creating
@@ -456,10 +458,12 @@ pub(crate) fn install_primary_task(id: ProcessId, task: TaskId) -> Result<(), Pr
     with_table(|table| table.install_primary_task(id, task))
 }
 
+#[allow(dead_code)] // Used by release process creation; QEMU-only builds omit that entry point.
 pub(crate) fn publish_created(id: ProcessId, task: TaskId) -> Result<(), ProcessError> {
     with_table(|table| table.publish_created(id, task))
 }
 
+#[cfg(feature = "qemu-test")]
 pub fn is_alive(id: ProcessId) -> bool {
     let Some(table) = PROCESS_TABLE.get() else {
         return false;
@@ -472,6 +476,7 @@ pub fn is_alive(id: ProcessId) -> bool {
     })
 }
 
+#[allow(dead_code)] // Required by callers that roll back a failed process construction transaction.
 pub fn abort_creation(id: ProcessId) -> Result<(), ProcessError> {
     with_table(|table| table.abort_creation(id))
 }
@@ -484,6 +489,7 @@ pub fn mark_zombie(id: ProcessId) -> Result<(), ProcessError> {
     with_table(|table| table.transition(id, ProcessState::Exiting, ProcessState::Zombie))
 }
 
+#[allow(dead_code)] // Kept as the internal Zombie reaper API until a wait/reaper service consumes it.
 pub fn reap(id: ProcessId) -> Result<(), ProcessError> {
     with_table(|table| table.reap(id))
 }
@@ -499,6 +505,7 @@ pub fn snapshot(id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
 /// process slot. Empty array entries represent Vacant or permanently Retired
 /// slots. The fixed result requires no heap allocation and is suitable as an
 /// internal source for future process-monitoring services.
+#[cfg(feature = "process-smoke-test")]
 pub fn snapshot_all() -> [Option<ProcessSnapshot>; MAX_PROCESSES] {
     let table = PROCESS_TABLE
         .get()
@@ -549,6 +556,7 @@ pub(crate) fn address_space_handle(id: ProcessId) -> Result<AddressSpaceHandle, 
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_handle(id))
 }
 
+#[allow(dead_code)] // 0.0.9 has no buffer-bearing syscall; future handlers must use this checked path.
 pub(crate) fn copy_from_user(
     id: ProcessId,
     address: u64,
@@ -575,6 +583,7 @@ pub(crate) fn copy_from_user(
     })
 }
 
+#[allow(dead_code)] // 0.0.9 has no buffer-bearing syscall; future handlers must use this checked path.
 pub(crate) fn copy_to_user(
     id: ProcessId,
     address: u64,

@@ -144,8 +144,7 @@ impl AddressSpace {
         entry: u64,
         user_rsp: u64,
     ) -> Result<ValidatedUserContext, AddressSpaceError> {
-        if entry < super::USER_MIN
-            || entry >= super::USER_MAX
+        if !(super::USER_MIN..super::USER_MAX).contains(&entry)
             || user_rsp <= super::USER_MIN
             || user_rsp > super::USER_MAX
             || user_rsp % 16 != 0
@@ -329,6 +328,7 @@ impl AddressSpace {
 
     /// Copies bytes from one mapped user page through its supervisor-only
     /// physical alias. The requested range must remain within that page.
+    #[cfg(feature = "qemu-test")]
     pub fn read_user_page(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -382,6 +382,10 @@ impl AddressSpace {
     /// changed while a syscall runs (IF is clear), and there is no user
     /// remapping, userspace threading, or SMP. Those assumptions must be
     /// revisited before adding any such feature.
+    // SAFETY/API NOTE: 0.0.9 deliberately ships the checked copy primitives
+    // before adding a syscall that consumes user buffers. Keep these methods
+    // available in normal builds for the first buffer-bearing syscall.
+    #[allow(dead_code)]
     pub fn copy_from_user(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -406,6 +410,7 @@ impl AddressSpace {
     /// Copies a complete kernel buffer into a writable userspace range
     /// through supervisor-only physical aliases. No raw user virtual pointer
     /// is passed to memcpy/copy_nonoverlapping.
+    #[allow(dead_code)]
     pub fn copy_to_user(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -427,6 +432,7 @@ impl AddressSpace {
         )
     }
 
+    #[allow(dead_code)]
     fn validate_copy_pages(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -451,6 +457,7 @@ impl AddressSpace {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn copy_user_chunks(
         &mut self,
         kernel: &mut KernelAddressSpace,
@@ -560,18 +567,21 @@ impl AddressSpace {
     }
 }
 
+#[allow(dead_code)] // Used by the checked user-copy API, currently no buffer syscall consumes it.
 #[derive(Clone, Copy)]
 struct CopyRange {
     start: u64,
     end: u64,
 }
 
+#[allow(dead_code)] // Used by the checked user-copy API, currently no buffer syscall consumes it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyDirection {
     FromUser,
     ToUser,
 }
 
+#[allow(dead_code)] // Used by the checked user-copy API, currently no buffer syscall consumes it.
 fn validate_copy_range(start: u64, len: usize) -> Result<CopyRange, AddressSpaceError> {
     if len == 0 {
         return Ok(CopyRange { start, end: start });
@@ -635,6 +645,7 @@ impl KernelAddressSpace {
     /// Prepares a process-root switch only after proving that its kernel-half
     /// PML4 entries exactly match the currently audited kernel root. The
     /// returned token must be activated after this lock guard is released.
+    #[cfg(feature = "qemu-test")]
     pub(crate) fn prepare_address_space_activation(
         &mut self,
         address_space: &AddressSpace,
@@ -897,7 +908,7 @@ impl KernelAddressSpace {
     fn verify_kernel_image_segments(&self) -> Result<(), &'static str> {
         let base = self.boot_mappings.kernel_image_base;
         self.verify_upper_address("kernel image base", base)?;
-        if base < super::BOOTLOADER_DYNAMIC_START || base >= super::BOOTLOADER_DYNAMIC_END {
+        if !(super::BOOTLOADER_DYNAMIC_START..super::BOOTLOADER_DYNAMIC_END).contains(&base) {
             return Err("kernel image base lies outside the bootloader dynamic arena");
         }
 
