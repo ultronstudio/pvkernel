@@ -3,9 +3,9 @@
 **Status:** authoritative 0.0.9 design; implementation in progress. The
 stable-baseline sections describe pvKernel 0.0.8 at
 `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
-Phase B boot-mapping audit/inactive-root construction, and Phase C user-stack
-and RSP0 support are implemented on the 0.0.9 branch; userspace scheduling
-and CR3 activation are not yet present.
+Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
+RSP0 support, and Phase D checked static ELF loading are implemented on the
+0.0.9 branch; userspace scheduling and CR3 activation are not yet present.
 
 ## 1. Scope and goals
 
@@ -489,6 +489,15 @@ overflow, segment and page-rounded overlap, stack/guard collision, supported
 alignment/flags, and W+X rejection. Entry must be canonical, user-range,
 mapped, and inside an executable segment. Malformed data returns typed
 loader errors, never panic.
+
+Implementation note: the byte parser uses checked field decoding and
+validates the complete image before allocating. To keep hostile-input work
+bounded, this implementation accepts at most 16 load segments and 4096
+mapped image pages (16 MiB). It rejects page-rounded overlap and stack/guard
+overlap. QEMU loads a two-segment test image, checks RX/RW/NX permissions,
+zero BSS and page padding, and rejects malformed identity/type/range/overlap/
+W+X/entry cases. This test validates loading and mapping only; it does not
+execute the ELF entry point.
 
 ## 24. W^X, BSS and user-page publication
 
