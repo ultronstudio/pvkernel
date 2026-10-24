@@ -9,6 +9,7 @@ mod arch;
 mod drivers;
 mod graphics;
 mod halt;
+mod process;
 mod task;
 
 use bootloader_api::config::{BootloaderConfig, Mapping};
@@ -82,6 +83,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::memory::run_boot_smoke_test();
     arch::x86_64::memory::run_heap_smoke_tests();
     task::init();
+    process::init();
 
     if let Some(framebuffer) = framebuffer.as_mut() {
         let info = framebuffer.info();
