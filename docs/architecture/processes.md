@@ -16,9 +16,9 @@ publication after the outgoing kernel stack becomes inactive; an embedded
 ELF smoke checks PID identity and non-returning exit. Phase I adds central
 page-chunked `copy_from_user`/`copy_to_user` APIs with full-range preflight;
 the dedicated QEMU test covers same/cross-page copies and hostile ranges.
-Phase J routes CPL3 #PF/#GP/#UD from process Tasks into the terminal exit
+Phase J routes CPL3 #PF/#GP/#UD/#NM from process Tasks into the terminal exit
 handoff and defers Zombie publication until a later PIT runs on an adopted
-stack; its QEMU scenario observes #PF/#GP/#UD, stack-guard and supervisor-
+stack; its QEMU scenario observes #PF/#GP/#UD/#NM, stack-guard and supervisor-
 mapping faults, then reaps their Zombies. Phase K adds saturating PIT-based
 process CPU accounting, a fixed-size `snapshot_all` API, real same-VA/
 different-frame user-process switching, and mixed scheduler/process capacity
@@ -336,7 +336,7 @@ locks before the `sti; hlt`-equivalent wait permits PIT delivery. Timer saves
 the CPL0 handoff context on that process's kernel stack, selects another
 context, and never restores the faulting user frame. Zombie is finalized on a
 later PIT after a different stack has been adopted. The QEMU scenario runs
-separate #PF/#GP/#UD processes, checks their scalar metadata and Zombie
+separate #PF/#GP/#UD/#NM processes, checks their scalar metadata and Zombie
 states, then reaps them while the kernel continues.
 
 ## 16. AddressSpace and frame ownership
@@ -673,7 +673,7 @@ continued kernel activity are observed.
 | `address-space-isolation-test` | A/B map same VA to different frames with AA/BB and alternate repeatedly | each always sees own value over A→B→A; tests CR3/TLB/scheduler |
 | `user-stack-guard-fault-test` | User writes below mapped stack | process fault recorded, kernel continues |
 | `user-kernel-isolation-test` | CPL3 reads/writes supervisor mapping | controlled fault/denial; kernel data unchanged |
-| `user-fault-containment-test` | Separate #PF/#GP/#UD processes | metadata and Zombie observed, other work continues, no panic/return |
+| `user-fault-containment-test` | Separate #PF/#GP/#UD/#NM processes | metadata and Zombie observed, other work continues, no panic/return |
 | `process-exit-test` | Known exit status then sentinel user instruction | sentinel never runs; Zombie retains status |
 | `process-capacity-test` | Fill shared slots and request one more | typed error; no panic/partial publication |
 | `process-id-reuse-test` | Reap and reuse slot | new generation/PID; old ProcessId rejected |
