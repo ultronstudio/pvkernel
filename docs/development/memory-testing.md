@@ -1,8 +1,8 @@
 # Memory subsystem tests
 
-This document describes pvKernel 0.0.5's memory-subsystem boot-time tests:
-the unconditional mapping smoke test, and the optional deterministic
-post-unmap page-fault test. See
+This document describes memory-subsystem boot-time tests added across pvKernel
+0.0.5 and 0.0.7, including the unconditional mapping and heap smoke tests and
+the optional deterministic post-unmap page-fault test. See
 [docs/architecture/virtual-memory.md](../architecture/virtual-memory.md) for
 the subsystem these tests exercise, and
 [docs/development/testing.md](testing.md) for the general headless-QEMU test
@@ -131,10 +131,10 @@ tests.
 
 ## CI integration
 
-`.github/workflows/ci.yml`'s `check` job builds `mem-fault-tests` alone and
-combined with `qemu-test`; the `qemu-tests` job builds and runs the headless
-`qemu-test mem-fault-tests` command above on every pull request and push to
-`main`, alongside the existing timer and page-fault tests.
+`.github/workflows/ci.yml` builds the relevant feature combinations in its
+`Build` matrix and runs `QEMU / post-unmap page fault` on every pull request
+and push to `main`, alongside the timer, expected page fault, supervisor
+write-protection, CPL3, and kernel-heap scenarios.
 
 ## Kernel heap tests (pvKernel 0.0.7)
 
