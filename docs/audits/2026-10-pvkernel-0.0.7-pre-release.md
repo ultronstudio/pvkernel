@@ -1,8 +1,11 @@
 # pvKernel 0.0.7 Pre-release Audit
 
-**Audit date:** 2026-10-24  
-**Audited `origin/main`:** `53dedd38b43e7aa12a4175390a9af2dc9ccbb3a1`  
-**0.0.7 feature head:** `26e002a6218a95d27110ed5d18dce4b2d80b7565`  
+**Audit date:** 2026-10-24
+
+**Audited `origin/main`:** `53dedd38b43e7aa12a4175390a9af2dc9ccbb3a1`
+
+**0.0.7 feature head:** `26e002a6218a95d27110ed5d18dce4b2d80b7565`
+
 **Baseline:** `v0.0.6`, `036e5cb3d235a881dcf2f7ff117c425e86b3d593`
 
 ## Scope
@@ -372,65 +375,89 @@ security boundary. Release CI includes executable heap tests.
 
 #### PVK-007-AUDIT-001 — RC dispatch does not constrain the selected ref
 
-**ID:** PVK-007-AUDIT-001  
-**Severity:** P2  
-**Component:** `.github/workflows/release-candidate.yml`  
-**Status:** Open / manual operator control  
+**ID:** PVK-007-AUDIT-001
+
+**Severity:** P2
+
+**Component:** `.github/workflows/release-candidate.yml`
+
+**Status:** Open / manual operator control
+
 **Description:** `workflow_dispatch` accepts version and RC number but does
 not assert `github.ref` is `refs/heads/main` or compare an operator-entered
-SHA.  
+SHA.
+
 **Security impact:** CI/security and the release build still operate on the
 same selected `github.sha`, and the manifest/attestation identify it. The
-remaining risk is accidentally publishing an RC from an unmerged branch.  
+remaining risk is accidentally publishing an RC from an unmerged branch.
+
 **Evidence:** RC build uses default checkout, release manifest records
 `github.sha`, and `gh release create --target` uses that same SHA; no branch
-or commit guard is present in RC validation.  
+or commit guard is present in RC validation.
+
 **Recommendation:** Restrict RC dispatch to `main` or add a full commit input
 and equality check. Until then, select `main` and compare the artifact
-manifest SHA with the intended commit before publishing/accepting RC1.  
+manifest SHA with the intended commit before publishing/accepting RC1.
+
 **Release blocking:** No for RC1 when the documented operator check is
 followed; should be hardened before automating RC dispatch.
 
 #### PVK-007-AUDIT-002 — deallocation cannot distinguish same-unit Layout sizes
 
-**ID:** PVK-007-AUDIT-002  
-**Severity:** P2  
-**Component:** `kernel/src/arch/x86_64/memory/allocator.rs`  
-**Status:** Open / defensive hardening  
+**ID:** PVK-007-AUDIT-002
+
+**Severity:** P2
+
+**Component:** `kernel/src/arch/x86_64/memory/allocator.rs`
+
+**Status:** Open / defensive hardening
+
 **Description:** `deallocate` checks the rounded 16-byte run length but does
 not retain the exact original byte size/alignment. Two different sizes that
-round to the same unit count can be accepted as equivalent.  
+round to the same unit count can be accepted as equivalent.
+
 **Security impact:** A caller violating the unsafe `GlobalAlloc::dealloc`
 contract could free an allocation using a mismatched same-unit layout.
 Correct Rust allocator callers use the original layout, so this is not a
-failure under valid `GlobalAlloc` use.  
+failure under valid `GlobalAlloc` use.
+
 **Evidence:** `allocation_units` rounds with `checked_add(15) / 16`; deallocate
 compares only `actual_units` to that rounded count and checks the supplied
 alignment against the pointer. No per-allocation exact-layout table exists.
-  
+
+
 **Recommendation:** If rejecting invalid unsafe frees is a required
 defense-in-depth guarantee, store and compare exact size/alignment metadata
 outside heap objects. Otherwise keep API documentation explicit that only
-the `GlobalAlloc` contract is supported.  
+the `GlobalAlloc` contract is supported.
+
 **Release blocking:** No; invalid caller behavior only.
 
 #### PVK-007-AUDIT-003 — stable Environment approval can be bypassed by admins
 
-**ID:** PVK-007-AUDIT-003  
-**Severity:** P2  
-**Component:** GitHub `release` Environment configuration  
-**Status:** Open / operational policy  
+**ID:** PVK-007-AUDIT-003
+
+**Severity:** P2
+
+**Component:** GitHub `release` Environment configuration
+
+**Status:** Open / operational policy
+
 **Description:** The environment has a required reviewer, but GitHub reports
-`can_admins_bypass: true` and `prevent_self_review: false`.  
+`can_admins_bypass: true` and `prevent_self_review: false`.
+
 **Security impact:** An administrator can bypass approval; the configured
 reviewer can approve their own deployment. This weakens independent stable
-release approval if independence is intended.  
+release approval if independence is intended.
+
 **Evidence:** `GET /repos/ultronstudio/pvkernel/environments/release` returned
 the required-reviewer rule, `ultronstudio` reviewer, admin bypass enabled,
-and self-review prevention disabled.  
+and self-review prevention disabled.
+
 **Recommendation:** Disable administrator bypass and configure an
 independent required reviewer if stable release requires separation of
-duties. Confirm the Environment configuration before stable publication.  
+duties. Confirm the Environment configuration before stable publication.
+
 **Release blocking:** No for RC1; address before stable release if
 independent approval is policy.
 
@@ -438,64 +465,96 @@ independent approval is policy.
 
 #### PVK-007-AUDIT-004 — stale allocator and CI descriptions
 
-**ID:** PVK-007-AUDIT-004  
-**Severity:** P3  
-**Component:** `ROADMAP.md`, `docs/development/memory-testing.md`  
-**Status:** Fixed in this audit branch  
+**ID:** PVK-007-AUDIT-004
+
+**Severity:** P3
+
+**Component:** `ROADMAP.md`, `docs/development/memory-testing.md`
+
+**Status:** Fixed in this audit branch
+
 **Description:** The roadmap still called the final allocator a free list;
-the memory-testing page referenced obsolete CI job names.  
-**Security impact:** Documentation drift only.  
-**Evidence:** Direct comparison with final `allocator.rs` and `ci.yml`.  
+the memory-testing page referenced obsolete CI job names.
+
+**Security impact:** Documentation drift only.
+
+**Evidence:** Direct comparison with final `allocator.rs` and `ci.yml`.
+
 **Recommendation:** Updated both descriptions to bitmap allocation and
-current QEMU/Build jobs.  
+current QEMU/Build jobs.
+
 **Release blocking:** No.
 
 #### PVK-007-AUDIT-005 — unexplained `.gitignore` comment
 
-**ID:** PVK-007-AUDIT-005  
-**Severity:** P3  
-**Component:** `.gitignore`  
-**Status:** Open / cosmetic  
+**ID:** PVK-007-AUDIT-005
+
+**Severity:** P3
+
+**Component:** `.gitignore`
+
+**Status:** Open / cosmetic
+
 **Description:** `# DON'T DELETE!!!` above `release-test/` does not explain
-the ignored directory.  
-**Security impact:** None identified.  
-**Evidence:** Merged PR #23 `.gitignore` change.  
+the ignored directory.
+
+**Security impact:** None identified.
+
+**Evidence:** Merged PR #23 `.gitignore` change.
+
 **Recommendation:** In a separate housekeeping change, replace the comment
-with `# Local release smoke-test artifacts`.  
+with `# Local release smoke-test artifacts`.
+
 **Release blocking:** No.
 
 ### Informational
 
 #### PVK-007-AUDIT-006 — OOM test exercises null return, not the handler
 
-**ID:** PVK-007-AUDIT-006  
-**Severity:** INFO  
-**Component:** OOM test coverage  
-**Status:** Accepted for 0.0.7  
+**ID:** PVK-007-AUDIT-006
+
+**Severity:** INFO
+
+**Component:** OOM test coverage
+
+**Status:** Accepted for 0.0.7
+
 **Description:** The expected-OOM QEMU test calls `GlobalAlloc::alloc` and
-checks for null rather than invoking `alloc_error_handler`.  
+checks for null rather than invoking `alloc_error_handler`.
+
 **Security impact:** The allocator's failure result is exercised; handler
 reporting/halt is verified by code inspection and compilation, not a runtime
 scenario. The handler is allocation-free and runs after the allocator lock
-is released.  
+is released.
+
 **Evidence:** `heap::run_oom_test`, `main.rs::alloc_error`, and serial
-`kprintln!` implementation.  
+`kprintln!` implementation.
+
 **Recommendation:** Consider an expected-handler QEMU mode in a later test
-hardening pass; no 0.0.7 blocker identified.  
+hardening pass; no 0.0.7 blocker identified.
+
 **Release blocking:** No.
 
 #### PVK-007-AUDIT-007 — only the lower guard is deliberately faulted
 
-**ID:** PVK-007-AUDIT-007  
-**Severity:** INFO  
-**Component:** Guard-page test coverage  
-**Status:** Accepted for 0.0.7  
-**Description:** QEMU deliberately accesses the lower guard only.  
+**ID:** PVK-007-AUDIT-007
+
+**Severity:** INFO
+
+**Component:** Guard-page test coverage
+
+**Status:** Accepted for 0.0.7
+
+**Description:** QEMU deliberately accesses the lower guard only.
+
 **Security impact:** Both lower and upper guards are checked unmapped before
 and after mapping; the heap mapping loop cannot map either guard. The missing
-upper destructive test does not leave an unverified mapping invariant.  
-**Evidence:** `heap::init` guard translations and `run_guard_fault_test`.  
-**Recommendation:** No change required for this fixed uniform mapping.  
+upper destructive test does not leave an unverified mapping invariant.
+
+**Evidence:** `heap::init` guard translations and `run_guard_fault_test`.
+
+**Recommendation:** No change required for this fixed uniform mapping.
+
 **Release blocking:** No.
 
 ## Known accepted limitations
