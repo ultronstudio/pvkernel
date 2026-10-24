@@ -724,6 +724,25 @@ pub(crate) fn current_user_pid() -> Option<u64> {
     process::pid(process_id).ok().map(|pid| pid.get())
 }
 
+/// Returns the generation-safe ProcessId for the currently running user
+/// Task, if any. The scheduler lock is released before callers access the
+/// process table or address-space subsystem.
+pub(crate) fn current_user_process_id() -> Option<ProcessId> {
+    let scheduler = SCHEDULER.get()?;
+    interrupts::without_interrupts(|| {
+        let scheduler = scheduler.lock();
+        let id = scheduler.current?;
+        let slot = scheduler.slots.get(id.slot())?;
+        if slot.generation != id.generation || slot.state != TaskState::Running {
+            return None;
+        }
+        match slot.kind {
+            TaskKind::User(process_id) => Some(process_id),
+            TaskKind::Kernel => None,
+        }
+    })
+}
+
 /// Begins terminal process exit from the current user Task. The syscall gate
 /// has IF=0; process and scheduler state are made safe under the documented
 /// scheduler -> process lock order, then both locks are released before the

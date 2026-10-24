@@ -12,7 +12,9 @@ timer frames and has a deterministic two-process preemption test; legacy
 direct-from-bootstrap CPL3 boundary tests retain their non-scheduling path.
 Phase H adds process-aware `getpid` and terminal `exit`, with deferred Zombie
 publication after the outgoing kernel stack becomes inactive; an embedded
-ELF smoke checks PID identity and non-returning exit.
+ELF smoke checks PID identity and non-returning exit. Phase I adds central
+page-chunked `copy_from_user`/`copy_to_user` APIs with full-range preflight;
+the dedicated QEMU test covers same/cross-page copies and hostile ranges.
 
 ## 1. Scope and goals
 
@@ -497,13 +499,16 @@ fork, exec/spawn, open/read/write, mmap, brk, signals or filesystem calls.
 
 ## 22. User-copy design
 
-Centralize `copy_from_user`/`copy_to_user` around an AddressSpace handle.
-Validate low/null policy, 48-bit canonicality, full range in `[USER_MIN,
-USER_MAX)`, checked `start + len`, every touched page present, effective USER
-at all levels, and writable destination for copy-to-user. Handle unaligned
-and cross-page ranges; define zero-length semantics (recommended no
-deref, with syscall pointer policy explicit). Return typed errors for bad
-range, overflow, missing page and permissions.
+The implementation centralizes `copy_from_user`/`copy_to_user` in
+`process::user_copy` and resolves only the current Running user Task's
+generation-safe ProcessId. It validates low/null policy, 48-bit canonicality,
+the full range in `[USER_MIN, USER_MAX)`, checked `start + len`, every touched
+page's effective USER permission, and writable destination for copy-to-user.
+Unaligned and cross-page ranges are copied in page-bounded chunks through the
+supervisor physical map. The entire range is preflighted before any copy, so
+an unmapped later page cannot partially update a kernel output buffer or user
+destination. Zero-length copies succeed without dereferencing or validating
+the pointer.
 
 Do not validate then raw-memcpy user VA. Copy in page-sized chunks through
 the kernel physical-memory mapping after translation. This is safe only
