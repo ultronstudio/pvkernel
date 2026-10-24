@@ -34,6 +34,8 @@ pub fn init() {
 
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        idt.device_not_available
+            .set_handler_fn(device_not_available_handler);
         idt.general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
@@ -300,6 +302,25 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
         );
     }
     kprintln!("[exception] invalid opcode");
+    kprintln!("{:#?}", stack_frame);
+    fatal_exit();
+}
+
+/// x87 execution raises #NM while CR0.EM is set. This kernel does not emulate
+/// or context-switch floating-point state, so reject it in CPL3 processes and
+/// keep unexpected kernel use fatal.
+extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    let cpl = stack_frame.code_segment.rpl();
+    if cpl == x86_64::PrivilegeLevel::Ring3 && crate::task::current_user_process_id().is_some() {
+        crate::task::terminate_current_user_fault(
+            7,
+            None,
+            None,
+            stack_frame.instruction_pointer.as_u64(),
+        );
+    }
+    kprintln!("[exception] device not available (#NM)");
+    kprintln!("origin: CPL{}", cpl as u8);
     kprintln!("{:#?}", stack_frame);
     fatal_exit();
 }

@@ -33,7 +33,7 @@ use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::{
     VirtAddr,
     registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags},
-    registers::model_specific::{Efer, EferFlags},
+    registers::model_specific::{Efer, EferFlags, Msr},
     structures::paging::PageTableFlags,
 };
 
@@ -562,6 +562,59 @@ fn validate_paging_prerequisites() {
     assert!(
         nx_enabled(),
         "pvKernel requires execute-disable support with IA32_EFER.NXE enabled"
+    );
+
+    // `int 0x80` is the only supported privilege-entry ABI. UEFI may leave
+    // the fast-entry MSRs configured, so make SYSCALL unavailable and make
+    // SYSENTER fault instead of jumping to firmware-owned targets after a
+    // CPL3 payload executes either instruction.
+    let efer = Efer::read();
+    if efer.contains(EferFlags::SYSTEM_CALL_EXTENSIONS) {
+        // SAFETY: only EFER.SCE is cleared; the read value preserves NXE and
+        // every other defined EFER feature bit required by the running kernel.
+        unsafe { Efer::write(efer & !EferFlags::SYSTEM_CALL_EXTENSIONS) };
+    }
+    assert!(
+        !Efer::read().contains(EferFlags::SYSTEM_CALL_EXTENSIONS),
+        "pvKernel requires EFER.SCE clear; int 0x80 is the only syscall ABI"
+    );
+
+    // In 64-bit mode SYSENTER requires a non-null IA32_SYSENTER_CS selector.
+    // Clear all three legacy fast-entry targets so a CPL3 SYSENTER raises
+    // #GP instead of entering an inherited firmware address/stack.
+    for register in [0x174, 0x175, 0x176] {
+        let mut msr = Msr::new(register);
+        // SAFETY: IA32_SYSENTER_CS/ESP/EIP are architectural MSRs supported
+        // by x86_64; writing zero disables the entry by making CS null and
+        // leaves no firmware-selected stack or instruction target active.
+        unsafe { msr.write(0) };
+    }
+    for register in [0x174, 0x175, 0x176] {
+        let msr = Msr::new(register);
+        // SAFETY: these architectural SYSENTER MSRs are supported by x86_64,
+        // and reading them has no side effects.
+        assert_eq!(
+            unsafe { msr.read() },
+            0,
+            "SYSENTER MSR {register:#x} not disabled"
+        );
+    }
+
+    // This milestone does not save/restore x87, MMX, SSE, or AVX state on a
+    // task switch. Set CR0.EM before any CPL3 context can run: Intel defines
+    // MMX/SIMD execution as #UD with EM set, and x87 execution as #NM. The
+    // corresponding handlers contain user attempts and keep kernel attempts
+    // fatal. The pinned x86_64-unknown-none target uses soft-float, so kernel
+    // code does not require these execution units.
+    let cr0 = Cr0::read();
+    if !cr0.contains(Cr0Flags::EMULATE_COPROCESSOR) {
+        // SAFETY: setting CR0.EM is valid in long mode and prevents the
+        // kernel/userspace from using unsaved floating-point register state.
+        unsafe { Cr0::write(cr0 | Cr0Flags::EMULATE_COPROCESSOR) };
+    }
+    assert!(
+        Cr0::read().contains(Cr0Flags::EMULATE_COPROCESSOR),
+        "pvKernel requires CR0.EM to prevent unsaved floating-point state"
     );
 
     // Supervisor write protection is required for read-only page-table
