@@ -9,7 +9,7 @@ members = ["kernel"]
 # docs/security/vulnerability-management.md and the release workflows for
 # why that consistency matters at release time.
 [workspace.package]
-version = "0.0.8"
+version = "0.0.9"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 repository = "https://github.com/ultronstudio/pvkernel"

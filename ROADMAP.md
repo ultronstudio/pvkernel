@@ -108,13 +108,22 @@ remain future work.
 * QEMU coverage for scheduler operation, true timer preemption, stack guards,
   and capacity/reuse
 
-## 0.0.9 — Processes and Userspace Address Spaces
+## 0.0.9 — Processes and Userspace Address Spaces (implemented; unreleased)
 
-* process model and process lifecycle foundation
-* per-process address spaces and CR3 switching
-* userspace ELF execution foundation
-* builds on the existing provisional CPL3 entry/syscall boundary; does not
-  imply a stable userspace ABI
+* generation-safe ProcessId handles, monotonic PIDs, bounded process table,
+  parent identity, Zombie/reap lifecycle, and process snapshots
+* audited per-process address spaces and CR3 switching while preserving
+  supervisor-only kernel-global mappings
+* dedicated user and kernel-entry stacks, TSS.RSP0 switching, and true PIT
+  preemption from CPL3
+* checked static ELF64 `ET_EXEC` loading with W^X, BSS/page zeroing, and an
+  embedded smoke ELF before VFS/initrd exists
+* experimental `getpid`/`exit`, central checked user-copy, and CPL3
+  #PF/#GP/#UD containment
+* deterministic QEMU tests for process preemption, address-space isolation,
+  capacity/reuse, ELF validation, user-copy, guard faults, and containment
+* no stable userspace ABI is implied; first meaningful compatibility
+  checkpoint remains 0.1.0
 
 ## 0.0.10 — VFS and Initial Ramdisk
 

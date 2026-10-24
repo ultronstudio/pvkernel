@@ -1,62 +1,55 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.8. It does not describe planned or aspirational architecture; see
+version 0.0.9. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
 
-```
+```text
 UEFI firmware (OVMF)
-        │
-        ▼
-rust-osdev bootloader (external crate, not part of pvKernel)
-        │  loads the pvKernel ELF, exits UEFI boot services,
-        │  builds an initial page table mapping (incl. a physical-memory
-        │  offset mapping), and passes BootInfo
-        ▼
-pvKernel ELF (kernel_main)
-        │
-        ├── drivers::serial   – COM1 UART diagnostics (kprint!/kprintln!)
-        ├── arch::x86_64      – GDT, TSS, IDT, exception + IRQ handlers, PIC, PIT
-        ├── arch::x86_64::memory – physical frame allocator, active page table
-        │                          access, map/unmap/permission operations
-        ├── arch::x86_64::syscall – provisional int 0x80 syscall ABI
-        ├── arch::x86_64::userspace – test-only CPL0 → CPL3 (iretq) entry
-        ├── graphics::framebuffer – centered blue "P" logo
-        └── halt              – fatal halt vs. interrupt-enabled idle loop
+    |
+rust-osdev bootloader
+    |  upper-half dynamic mapping arena, BootInfo, framebuffer, memory map
+    v
+pvKernel kernel_main
+    |-- drivers::serial, graphics::framebuffer, halt
+    |-- arch::x86_64
+    |   |-- GDT/TSS/RSP0, IDT, PIC/PIT, exception and timer entry
+    |   |-- memory: physical allocator, audited kernel root, AddressSpace
+    |   |-- syscall: experimental scalar int 0x80 ABI
+    |-- task: bounded scheduler, kernel/user Task contexts, SwitchPlan
+    |-- process: ProcessId/PID table, lifecycle, ELF64 loader, snapshots
 ```
-
 ## Responsibility boundary
 
-The root `task` module owns the fixed task table and runnable ring.
-`arch::x86_64::task` owns task stack mapping, the saved frame layout, and the
-small timer-entry/trampoline assembly. Policy stays in Rust; CR3 remains
-shared across all kernel tasks.
+The root `task` module owns the bounded Task table, runnable ring, context
+selection, and kernel/user execution-context state. `process` owns generation-
+safe ProcessId identity, boot-lifetime PIDs, process lifecycle, AddressSpace
+ownership, and process metadata. `arch::x86_64::memory` owns the kernel root,
+inactive process-root construction, mapping audit, and CR3 activation.
+`arch::x86_64::task` owns task-stack mapping, the saved frame layout, and the
+timer-entry/trampoline assembly. Scheduler policy remains separate from
+process policy, and the PIT hot path does not allocate or parse executable data.
 
 * **UEFI firmware**: powers on the machine, initializes basic platform
   devices, and runs the boot manager.
-* **rust-osdev bootloader**: locates and loads the pvKernel ELF binary,
-  establishes an initial 4-level page table mapping and stack, collects the
-  boot memory map and framebuffer information into `BootInfo`, and transfers
-  control to `kernel_main`. pvKernel does not currently own or replace this
-  page table mapping.
-* **pvKernel**: everything from `kernel_main` onward. This includes serial
-  diagnostics, the GDT/TSS, the IDT and its exception/IRQ handlers, the
-  legacy 8259 PIC and PIT drivers, the physical frame allocator and active
-  page-table access, a provisional `int 0x80` syscall ABI, and (test-only)
-  CPL0 → CPL3 userspace entry, and framebuffer rendering.
-* **Kernel tasks**: 0.0.8 adds bounded, preemptive, single-core ring-0 tasks
-  with separate guarded stacks. It does not schedule CPL3 payloads or switch
-  CR3; see [docs/architecture/kernel-tasks.md](docs/architecture/kernel-tasks.md).
-* **Future pvOS userspace**: 0.0.6 adds only a minimal, test-only CPL0 →
-  CPL3 transition and bootstrap syscall ABI (see
-  [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)
-  and [docs/architecture/syscalls.md](docs/architecture/syscalls.md)); a
-  process model and ELF userspace loading remain future roadmap items (see
-  [ROADMAP.md](ROADMAP.md)); pvKernel does not
-  currently support them.
-
+* **rust-osdev bootloader**: loads the pvKernel ELF, exits UEFI boot services,
+  creates the initial 4-level mappings and stack, and passes `BootInfo`.
+  pvKernel audits required mappings and constrains dynamic boot mappings to
+  the upper canonical half before it can activate process CR3 roots.
+* **Kernel Tasks**: bounded preemptive single-core ring-0 contexts with
+  dedicated supervisor-only guarded stacks.
+* **Process Tasks**: one CPL3 Task per process in 0.0.9, each with an isolated
+  lower-half address space, dedicated USER RW/NX stack and supervisor kernel
+  entry stack. Timer IRQs can preempt CPL3 execution and switch CR3/RSP0.
+* **Userspace ABI**: experimental `int 0x80` scalar `getpid` and terminal
+  `exit`. The checked static ELF64 loader accepts only validated `ET_EXEC`
+  `PT_LOAD` images. CPL3 #PF/#GP/#UD terminate the affected process and retain
+  scalar fault metadata. No stable ABI is promised before 0.1.0.
+* **Future work**: VFS/initrd, `/bin/init`, FDs, fork/general exec, dynamic
+  linking, user heap/mmap, signals, IPC, general frame reclamation, storage,
+  networking, SMP, and GUI remain out of scope.
 ## Initialization order
 
 1. `kernel_main` receives `BootInfo` from the bootloader.
@@ -72,9 +65,10 @@ shared across all kernel tasks.
       (`x86_64::instructions::interrupts::disable()`).
    2. The kernel-owned GDT and TSS are built and loaded
       (`arch::x86_64::gdt`), including the dedicated double-fault IST stack,
-      ring-3 (CPL3) code/data segment descriptors, and a dedicated
-      TSS.RSP0 ring-transition kernel stack (see
-      [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)).
+      ring-3 (CPL3) code/data segment descriptors, and a kernel-lifetime
+      fallback TSS.RSP0 stack. User Task kernel-stack tops are installed
+      before returning to CPL3 (see
+      [docs/architecture/processes.md](docs/architecture/processes.md)).
    3. The kernel-owned IDT is built and loaded (`arch::x86_64::interrupts`),
       including handlers for all 16 remapped IRQ vectors (32-47) and the
       `int 0x80` syscall gate (see
@@ -121,13 +115,17 @@ shared across all kernel tasks.
 12. If `supervisor-write-protection-test` is enabled, a CPL0 write to a
     supervisor-only read-only page verifies CR0.WP behavior through an
     expected protection-violation page fault.
-13. If exactly one `userspace-*-test` Cargo feature is enabled, a hand-written
-    test payload is mapped into the reserved userspace range and entered at
-    CPL3 via `iretq`; the scenario ends deterministically (see
-    [docs/development/userspace-testing.md](docs/development/userspace-testing.md)).
-14. The timer entry saves the complete interrupt context, schedules CPL0
-    contexts only, and resumes bootstrap after both smoke tasks exit.
-15. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
+13. The process subsystem audits required boot mappings, initializes its
+    bounded table, and can construct inactive process address spaces while
+    preserving audited supervisor-only kernel mappings.
+14. Process-owned tasks use checked ELF loading, dedicated user and kernel
+    stacks, and timer-driven CPL3 preemption. On ordinary boots an embedded
+    static smoke ELF exercises CPL3 entry, `getpid`, and terminal `exit`;
+    QEMU features select deterministic process and legacy boundary scenarios.
+15. The timer entry saves the complete interrupt context and can schedule
+    both CPL0 kernel tasks and process-owned CPL3 tasks, switching CR3 and
+    TSS.RSP0 according to the selected context.
+16. The CPU enters an interrupt-enabled idle loop (`halt::idle_loop`), unless
     the `qemu-test` Cargo feature is enabled, in which case QEMU exits
     deterministically instead (see
     [docs/development/testing.md](docs/development/testing.md)).
@@ -152,10 +150,11 @@ items.
 * a TSS descriptor, wrapping a kernel-owned `TaskStateSegment`;
 * a dedicated double-fault stack (5 × 4 KiB), referenced by IST index
   `DOUBLE_FAULT_IST_INDEX`;
-* ring-3 (CPL3) code and data segment descriptors, and a dedicated,
-  writable TSS.RSP0 ring-transition kernel stack (4 × 4 KiB), used only
-  when entering CPL3 (see
-  [docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)).
+* ring-3 (CPL3) code and data segment descriptors, and a kernel-lifetime
+  fallback RSP0 stack for bootstrap/kernel execution. Before returning to
+  CPL3, the scheduler installs the selected user Task's guarded supervisor
+  kernel-stack top in TSS.RSP0 (see
+  [docs/architecture/processes.md](docs/architecture/processes.md)).
 
 The GDT and TSS are stored in `spin::Once` cells with `'static` storage
 duration, loaded once, and never replaced during the kernel's lifetime.
@@ -173,9 +172,9 @@ handler-level detail.
 
 * `BootFrameAllocator` — a monotonic physical frame allocator built once
   from the bootloader's memory map;
-* `KernelAddressSpace` — the single active x86_64 page table (an
-  `OffsetPageTable` over the CR3-resident level-4 table, reached through the
-  bootloader's physical-memory offset mapping), paired with the frame
+* the active kernel root (`KernelAddressSpace`) and process-owned inactive
+  `AddressSpace` roots. Page-table frames are reached through the audited
+  bootloader physical-memory offset mapping and paired with the frame
   allocator.
 
 Both are stored together behind a `spin::Mutex`, itself behind a
@@ -202,22 +201,24 @@ the heap for the kernel lifetime and are not reclaimed by `Box`, `Vec`, or
 [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
 for the layout and safety invariants.
 
-## Syscall and userspace entry ownership (0.0.6)
+## Syscall and userspace entry ownership (0.0.9)
 
-`arch::x86_64::syscall` owns a minimal, provisional, scalar-only `int 0x80`
-syscall ABI: a naked-asm entry stub installed into the IDT's vector `0x80`,
-a `SyscallFrame` register-frame layout built on the RSP0 stack, and a
-Rust-side dispatcher. `arch::x86_64::userspace` owns the (test-only, behind
-Cargo features) code that maps a hand-written payload into the reserved
-userspace virtual-address range and transitions into it via `iretq`. See
+`arch::x86_64::syscall` owns the experimental scalar `int 0x80` ABI: a
+naked-asm entry stub at vector `0x80`, the `SyscallFrame` saved on the
+selected user's supervisor RSP0 stack, and a Rust dispatcher for `getpid`
+and terminal `exit`. The separate legacy `arch::x86_64::userspace` module
+retains bootstrap CPL3 boundary-test payloads. Process-owned user Tasks use
+the normal checked ELF loader and synthetic scheduler context; ordinary
+boots run an embedded static smoke executable until VFS/initrd is available.
+See
 [docs/architecture/syscalls.md](docs/architecture/syscalls.md) and
-[docs/architecture/userspace-entry.md](docs/architecture/userspace-entry.md)
-for the full design.
+[docs/architecture/processes.md](docs/architecture/processes.md) for the
+current details.
 
 ## Fatal exception behavior
 
-Breakpoint exceptions log the event and return normally. Invalid opcode,
-general protection fault, page fault, and double fault are treated as fatal:
+Breakpoint exceptions log the event and return normally. CPL0 invalid opcode,
+general protection fault, page fault, and double fault remain kernel-fatal:
 they log structured diagnostics (exception name, error code where relevant,
 faulting address for page faults, the CPL the fault originated from, and the
 interrupt stack frame) and then call `halt::halt_forever` directly (or,
@@ -225,6 +226,9 @@ under the `qemu-test` feature, exit QEMU with a failure status instead),
 without invoking `panic!`. The exceptions are deliberately triggered faults
 under the `fault-tests`, `userspace-privilege-fault-test`, and
 `userspace-supervisor-fault-test` features: when one matches its expected
-signature, it is treated as a passed test rather than a fatal condition (see
+signature, it is treated as a passed test rather than a fatal condition.
+CPL3 #UD/#GP/#PF from a process-owned Task instead capture scalar fault
+metadata and use the terminal scheduler handoff to terminate that process;
+the kernel remains active. See
 [docs/development/testing.md](docs/development/testing.md) and
-[docs/development/userspace-testing.md](docs/development/userspace-testing.md)).
+[docs/development/userspace-testing.md](docs/development/userspace-testing.md).
