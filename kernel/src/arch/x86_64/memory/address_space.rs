@@ -51,6 +51,7 @@ pub enum AddressSpaceError {
     NonUserPermissions,
     UserPageAlreadyMapped,
     UserPageNotMapped,
+    StackCollision,
     Mapping(MemoryError),
     AccountingOverflow,
     InvalidCopyRange,
