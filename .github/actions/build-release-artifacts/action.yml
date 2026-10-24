@@ -53,21 +53,49 @@ runs:
         upload-artifact: false
         upload-release-assets: false
 
-    - name: Build release profile
+    - name: Build release profile and capture Cargo metadata
+      id: locate
       shell: bash
       # This is the same build.rs-driven process as `cargo build`/`cargo
       # run` in every other job: compiling the root `pvkernel-runner`
       # package compiles the `kernel` artifact dependency first, then
       # build.rs calls `bootloader::UefiBoot::create_disk_image` to embed
-      # it into a UEFI disk image. Nothing here is a placeholder; both
-      # outputs located below are real build products of this exact commit.
-      run: cargo build --release --locked
-
-    - name: Locate build outputs and stage artifacts
-      id: locate
-      shell: bash
+      # it into a UEFI disk image. Cargo's JSON messages identify the
+      # authoritative OUT_DIR; this action does not infer Cargo's layout.
       run: |
         set -euo pipefail
+
+        metadata_json="$RUNNER_TEMP/pvkernel-cargo-metadata.json"
+        build_messages="$RUNNER_TEMP/pvkernel-release-build.jsonl"
+        cargo metadata --format-version 1 --no-deps --locked > "$metadata_json"
+        package_id="$(python3 scripts/cargo_release_out_dir.py package-id "$metadata_json")"
+
+        cargo build \
+          --release \
+          --locked \
+          --message-format=json-render-diagnostics \
+          | tee "$build_messages"
+
+        out_dir="$(python3 scripts/cargo_release_out_dir.py out-dir "$package_id" "$build_messages")"
+        kernel_elf="$out_dir/pvkernel-kernel.elf"
+        uefi_img="$out_dir/pvkernel-uefi.img"
+
+        if [ ! -f "$kernel_elf" ]; then
+          echo "::error::pvkernel-kernel.elf is missing from Cargo-reported pvkernel-runner OUT_DIR" >&2
+          exit 1
+        fi
+        if [ ! -s "$kernel_elf" ]; then
+          echo "::error::pvkernel-kernel.elf in Cargo-reported pvkernel-runner OUT_DIR is empty" >&2
+          exit 1
+        fi
+        if [ ! -f "$uefi_img" ]; then
+          echo "::error::pvkernel-uefi.img is missing from Cargo-reported pvkernel-runner OUT_DIR" >&2
+          exit 1
+        fi
+        if [ ! -s "$uefi_img" ]; then
+          echo "::error::pvkernel-uefi.img in Cargo-reported pvkernel-runner OUT_DIR is empty" >&2
+          exit 1
+        fi
 
         version="${{ inputs.version }}"
         label="${{ inputs.release-label }}"
@@ -75,29 +103,6 @@ runs:
         if [ -n "$label" ]; then
           suffix="${version}-${label}"
         fi
-
-        out_dir=""
-        while IFS= read -r candidate; do
-          if [ -f "$candidate/pvkernel-kernel.elf" ] &&
-             [ -f "$candidate/pvkernel-uefi.img" ]; then
-            if [ -n "$out_dir" ]; then
-              echo "::error::multiple matching pvkernel-runner OUT_DIR directories found" >&2
-              exit 1
-            fi
-            out_dir="$candidate"
-          fi
-        done < <(find target/release/build -maxdepth 2 \
-          -type d \
-          -path '*/pvkernel-runner-*/out' \
-          -print)
-
-        if [ -z "$out_dir" ]; then
-          echo "::error::no pvkernel-runner OUT_DIR contains both pvkernel-kernel.elf and pvkernel-uefi.img" >&2
-          exit 1
-        fi
-
-        kernel_elf="$out_dir/pvkernel-kernel.elf"
-        uefi_img="$out_dir/pvkernel-uefi.img"
 
         dir="release-artifacts"
         # Deliberately not `rm -rf`: the SBOM was already generated into
