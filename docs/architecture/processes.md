@@ -154,6 +154,14 @@ GPRs on RSP0, calls the scalar dispatcher, writes its return to saved RAX,
 restores registers and `iretq`s. As an interrupt gate, it clears IF; PIT
 cannot preempt a syscall body. Keep this non-preemptible syscall policy.
 
+The 0.0.9 context frame does not save x87, MMX, SSE, or AVX state. Before
+userspace runs, the kernel therefore sets CR0.EM, clears CR4.OSXSAVE and
+EFER.SCE, and zeros IA32_SYSENTER_CS/ESP/EIP. This contains x87/legacy-SIMD
+and AVX use as process faults and prevents inherited firmware SYSCALL or
+SYSENTER targets from bypassing the `int 0x80` boundary. Saving floating-point
+state and enabling those instruction families requires a later explicit
+per-task state design.
+
 ## 7. Current virtual-address map
 
 Four-level canonical ranges are lower `0x0000_0000_0000_0000` through
