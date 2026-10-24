@@ -61,6 +61,12 @@ heap-test = []
 heap-oom-test = ["heap-test"]
 # Reads the unmapped heap guard page and expects a supervisor #PF (QEMU only).
 heap-guard-fault-test = ["heap-test"]
+# Deterministic kernel-task scheduling coverage; the normal boot smoke also
+# exercises two tasks, while this feature gives it a dedicated QEMU job.
+scheduler-test = []
+scheduler-preemption-test = ["qemu-test"]
+task-stack-guard-fault-test = ["qemu-test"]
+task-capacity-test = []
 
 [dependencies]
 bootloader_api = "=0.11.17"

@@ -9,6 +9,7 @@ mod arch;
 mod drivers;
 mod graphics;
 mod halt;
+mod task;
 
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
@@ -80,6 +81,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     arch::x86_64::memory::run_boot_smoke_test();
     arch::x86_64::memory::run_heap_smoke_tests();
+    task::init();
 
     if let Some(framebuffer) = framebuffer.as_mut() {
         let info = framebuffer.info();
@@ -102,6 +104,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     arch::x86_64::interrupts::run_breakpoint_test();
 
+    let scheduler_smoke_tasks = task::prepare_smoke_test();
+
     let ticks_before = pit::ticks();
     kprintln!("[test] waiting for timer interrupts");
 
@@ -110,8 +114,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     x86_64::instructions::interrupts::enable();
     kprintln!("[cpu] maskable hardware interrupts enabled");
+    kprintln!("[scheduler] timer preemption enabled");
 
     pit::wait_for_ticks(TIMER_TEST_TICKS);
+    task::run_smoke_test(scheduler_smoke_tasks.0, scheduler_smoke_tasks.1);
+
+    #[cfg(feature = "scheduler-preemption-test")]
+    task::run_preemption_test();
+
+    #[cfg(feature = "task-capacity-test")]
+    task::run_capacity_test();
 
     let ticks_after = pit::ticks();
     kprintln!(
@@ -146,7 +158,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(feature = "userspace-test")]
     arch::x86_64::userspace::run_test();
 
-    #[cfg(not(feature = "userspace-test"))]
+    #[cfg(feature = "task-stack-guard-fault-test")]
+    task::run_stack_guard_fault_test();
+
+    #[cfg(all(
+        not(feature = "userspace-test"),
+        not(feature = "task-stack-guard-fault-test")
+    ))]
     {
         kprintln!("pvKernel {} initialized", env!("CARGO_PKG_VERSION"));
         kprintln!("entering interrupt-enabled idle loop");

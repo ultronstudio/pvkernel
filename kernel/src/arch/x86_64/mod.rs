@@ -6,6 +6,7 @@ pub mod pit;
 #[cfg(feature = "qemu-test")]
 pub mod qemu;
 pub mod syscall;
+pub mod task;
 #[cfg(feature = "userspace-test")]
 pub mod userspace;
 
