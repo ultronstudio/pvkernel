@@ -23,6 +23,16 @@ pub struct TaskId {
     generation: u64,
 }
 
+/// Complete target description for the architecture handoff. Scheduler and
+/// process locks are released before this plan is resolved to a root and
+/// applied; assembly receives only `context_rsp` after CR3/RSP0 are safe.
+#[derive(Clone, Copy)]
+struct SwitchPlan {
+    context_rsp: u64,
+    target: TaskKind,
+    task_slot: Option<usize>,
+}
+
 impl TaskId {
     pub const fn slot(self) -> usize {
         self.slot as usize
@@ -509,7 +519,7 @@ pub fn task_state(id: TaskId) -> Option<TaskState> {
 
 /// Called only by the assembly IRQ0 boundary with IF cleared by the IDT
 /// interrupt gate. The pointer is the exact register+hardware frame created
-/// by `switch.rs`; CPL3 frames are returned untouched after tick/EOI work.
+/// by `switch.rs`; CPL3 scheduling remains disabled until Phase G.
 pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task::Context {
     pit::record_tick();
     // SAFETY: assembly passes the address of its just-saved register prefix;
@@ -527,7 +537,7 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
     let scheduler = SCHEDULER
         .get()
         .expect("timer IRQ before scheduler initialization");
-    let selected = interrupts::without_interrupts(|| {
+    let plan = interrupts::without_interrupts(|| {
         let mut scheduler = scheduler.lock();
         assert!(
             scheduler.initialized,
@@ -574,28 +584,62 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
             );
             assert_eq!(slot.state, TaskState::Ready, "queued task is not Ready");
             assert!(slot.queued, "queued task missing queued flag");
-            assert_eq!(
-                slot.kind,
-                TaskKind::Kernel,
-                "user Task selected before CR3-aware scheduling is implemented"
-            );
             slot.queued = false;
             slot.state = TaskState::Running;
             let saved_rsp = slot.saved_rsp;
             assert_task_stack_pointer(id.slot(), saved_rsp);
+            let target = slot.kind;
             scheduler.current = Some(id);
-            saved_rsp
+            SwitchPlan {
+                context_rsp: saved_rsp,
+                target,
+                task_slot: Some(id.slot()),
+            }
         } else {
             scheduler.current = None;
             assert_ne!(
                 scheduler.bootstrap_rsp, 0,
                 "bootstrap context was never captured"
             );
-            scheduler.bootstrap_rsp
+            SwitchPlan {
+                context_rsp: scheduler.bootstrap_rsp,
+                target: TaskKind::Kernel,
+                task_slot: None,
+            }
         }
     });
     pic::notify_end_of_interrupt(IrqLine::Timer);
-    selected as *mut arch_task::Context
+    apply_switch_plan(plan);
+    plan.context_rsp as *mut arch_task::Context
+}
+
+/// Resolves the selected process root and performs architecture state changes
+/// after scheduler locks are gone. IF is still clear from the interrupt gate;
+/// no lock spans EOI, CR3, RSP0, RSP adoption, or iretq.
+fn apply_switch_plan(plan: SwitchPlan) {
+    let user_target = match plan.target {
+        TaskKind::Kernel => None,
+        TaskKind::User(process_id) => Some(
+            process::address_space_handle(process_id)
+                .expect("selected user task has no Alive process address space"),
+        ),
+    };
+    crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+        match user_target {
+            Some(address_space) => kernel
+                .activate_handle(address_space)
+                .expect("selected process root failed the kernel mapping audit"),
+            None => kernel
+                .activate_kernel_root()
+                .expect("kernel root failed the mapping audit"),
+        }
+        if let Some(slot) = plan.task_slot.filter(|_| user_target.is_some()) {
+            let (_, top) = arch_task::stack_bounds(slot).expect("user task stack slot invalid");
+            gdt::set_current_rsp0(top).expect("selected user task has invalid kernel stack");
+        } else {
+            gdt::set_kernel_fallback_rsp0().expect("kernel fallback RSP0 is unavailable");
+        }
+    });
 }
 
 fn assert_task_stack_pointer(slot: usize, rsp: u64) {

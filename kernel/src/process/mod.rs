@@ -7,7 +7,11 @@ pub mod elf;
 
 use spin::{Mutex, Once};
 
-use crate::{arch::x86_64::memory::AddressSpace, kprintln, task::TaskId};
+use crate::{
+    arch::x86_64::memory::{AddressSpace, AddressSpaceHandle},
+    kprintln,
+    task::TaskId,
+};
 
 pub const MAX_PROCESSES: usize = 8;
 pub const PROCESS_NAME_CAPACITY: usize = 32;
@@ -372,6 +376,17 @@ impl ProcessTable {
             .ok_or(ProcessError::InvalidTransition)
     }
 
+    fn address_space_handle(&self, id: ProcessId) -> Result<AddressSpaceHandle, ProcessError> {
+        let slot = self.slot_for(id)?;
+        if slot.state != ProcessState::Alive {
+            return Err(ProcessError::InvalidTransition);
+        }
+        slot.address_space
+            .as_ref()
+            .map(AddressSpace::handle)
+            .ok_or(ProcessError::InvalidTransition)
+    }
+
     fn snapshot(&self, id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         let slot = self.slot_for(id)?;
         Ok(slot.snapshot(id))
@@ -471,6 +486,13 @@ pub(crate) fn address_space_root(
 {
     let table = PROCESS_TABLE.get().ok_or(ProcessError::InvalidId)?;
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_root(id))
+}
+
+pub(crate) fn address_space_handle(id: ProcessId) -> Result<AddressSpaceHandle, ProcessError> {
+    let table = PROCESS_TABLE
+        .get()
+        .expect("process subsystem used before init");
+    x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_handle(id))
 }
 
 fn run_model_self_tests() {
