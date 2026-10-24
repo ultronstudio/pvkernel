@@ -26,9 +26,21 @@ compile_error!("process-preemption-test and process-smoke-test are separate QEMU
     all(
         feature = "user-fault-containment-test",
         feature = "process-smoke-test"
+    ),
+    all(
+        feature = "address-space-isolation-test",
+        feature = "process-preemption-test"
+    ),
+    all(
+        feature = "address-space-isolation-test",
+        feature = "process-smoke-test"
+    ),
+    all(
+        feature = "address-space-isolation-test",
+        feature = "user-fault-containment-test"
     )
 ))]
-compile_error!("process fault containment has a dedicated QEMU scenario");
+compile_error!("process QEMU scenarios have separate feature selections");
 
 pub const MAX_KERNEL_TASKS: usize = arch_task::MAX_KERNEL_TASKS;
 pub type KernelTaskEntry = fn();
@@ -180,7 +192,11 @@ static PROCESS_SMOKE_START_TICK: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "process-smoke-test")]
 static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
 #[cfg(feature = "user-fault-containment-test")]
-static USER_FAULT_IDS: Once<[ProcessId; 3]> = Once::new();
+static USER_FAULT_IDS: Once<[ProcessId; 5]> = Once::new();
+#[cfg(feature = "address-space-isolation-test")]
+static ADDRESS_ISOLATION_IDS: Once<[ProcessId; 2]> = Once::new();
+#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
+static RELEASE_SMOKE_ID: Once<ProcessId> = Once::new();
 static SMOKE_A: AtomicU64 = AtomicU64::new(0);
 static SMOKE_B: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A_SP: AtomicU64 = AtomicU64::new(0);
@@ -645,6 +661,13 @@ pub(crate) fn timer_schedule(context: *mut arch_task::Context) -> *mut arch_task
                         );
                     }
                     assert!(!slot.queued, "Running task appeared in queue");
+                    if let TaskKind::User(process_id) = slot.kind {
+                        // PIT tick is charged to the process whose task was
+                        // executing when the interrupt arrived, including
+                        // terminal kernel work on its behalf. The process
+                        // table uses saturating accounting.
+                        process::account_cpu_tick(process_id);
+                    }
                     slot.saved_rsp = context as u64;
                     assert_task_stack_pointer(id.slot(), slot.saved_rsp);
                     if slot.state == TaskState::Exiting {
@@ -958,19 +981,93 @@ pub fn prepare_process_smoke_test() {
     kprintln!("[process-test] embedded ELF prepared for PID {pid}");
 }
 
+/// Prepares the small embedded ELF used on ordinary release-safe boots while
+/// pvKernel has no VFS/initrd provider. Its bytes still go through the
+/// normal checked static ELF loader and process publication path.
+#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
+pub fn prepare_release_userspace_smoke() {
+    kprintln!("[process] initializing");
+    kprintln!("[process] process capacity: {}", process::MAX_PROCESSES);
+    kprintln!("[process] address-space isolation ready");
+    kprintln!("[process] loading userspace smoke");
+    let process_id = process::reserve(None, "userspace-smoke", pit::ticks())
+        .expect("could not reserve release userspace smoke process");
+    let pid = process::snapshot(process_id)
+        .expect("release smoke process lacks metadata")
+        .pid
+        .get();
+    let bytes = process::elf::process_smoke_elf(pid);
+    let (address_space, context) =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut address_space = kernel
+                .create_address_space()
+                .expect("could not create release smoke AddressSpace");
+            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                .expect("could not map release smoke user stack");
+            let image = process::elf::load_static_elf(&mut address_space, kernel, &bytes)
+                .expect("embedded release smoke ELF rejected");
+            let context = address_space
+                .validate_user_context(
+                    kernel,
+                    image.entry,
+                    crate::arch::x86_64::memory::USER_STACK_TOP,
+                )
+                .expect("release smoke user context invalid");
+            (address_space, context)
+        });
+    process::install_address_space(process_id, address_space)
+        .expect("could not attach release smoke AddressSpace");
+    let task_id =
+        prepare_user_task(process_id, context).expect("could not prepare release smoke Task");
+    process::install_primary_task(process_id, task_id)
+        .expect("could not attach release smoke primary Task");
+    publish_prepared_user_task(task_id).expect("could not publish release smoke process");
+    RELEASE_SMOKE_ID.call_once(|| process_id);
+}
+
+#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
+pub fn wait_for_release_userspace_smoke() {
+    let process_id = *RELEASE_SMOKE_ID
+        .get()
+        .expect("release smoke process was not prepared");
+    loop {
+        if let Ok(snapshot) = process::snapshot(process_id) {
+            if snapshot.state == process::ProcessState::Zombie {
+                match snapshot.exit_reason {
+                    Some(ProcessExitReason::Exited { status: 0 }) => {
+                        kprintln!("[process] userspace smoke exited cleanly");
+                        process::reap(process_id).expect("could not reap release smoke process");
+                        kprintln!("[process] userspace smoke passed");
+                        return;
+                    }
+                    reason => panic!("release userspace smoke failed: {reason:?}"),
+                }
+            }
+        }
+        hlt();
+    }
+}
+
 #[cfg(feature = "user-fault-containment-test")]
 pub fn prepare_user_fault_containment_test() {
-    let mut ids = [None; 3];
-    for (index, vector) in [14u8, 13, 6].into_iter().enumerate() {
-        let name = match vector {
-            14 => "fault-pf",
-            13 => "fault-gp",
-            6 => "fault-ud",
-            _ => unreachable!(),
-        };
+    let stack_guard = crate::arch::x86_64::memory::USER_STACK_TOP
+        - crate::arch::x86_64::memory::USER_STACK_SIZE
+        - 4096;
+    let scenarios = [
+        (14u8, Some(0x3000_0000), "fault-pf-unmapped"),
+        (14u8, Some(0xffff_8000_0000_0000), "fault-kernel-isolation"),
+        (14u8, Some(stack_guard), "fault-user-stack-guard"),
+        (13u8, None, "fault-gp"),
+        (6u8, None, "fault-ud"),
+    ];
+    let mut ids = [None; 5];
+    for (index, (vector, fault_address, name)) in scenarios.into_iter().enumerate() {
         let process_id = process::reserve(None, name, pit::ticks())
             .expect("failed to reserve fault-containment process");
-        let image = process::elf::process_fault_elf(vector);
+        let image = match fault_address {
+            Some(address) => process::elf::process_fault_elf_at(vector, address),
+            None => process::elf::process_fault_elf(vector),
+        };
         let (address_space, context) =
             crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
                 let mut address_space = kernel
@@ -1010,7 +1107,21 @@ pub fn wait_for_user_fault_containment_test() {
     let start_tick = pit::ticks();
     loop {
         let mut zombies = 0;
-        for (process_id, expected_vector) in ids.iter().zip([14u8, 13, 6]) {
+        let expected = [
+            (14u8, Some(0x3000_0000)),
+            (14u8, Some(0xffff_8000_0000_0000)),
+            (
+                14u8,
+                Some(
+                    crate::arch::x86_64::memory::USER_STACK_TOP
+                        - crate::arch::x86_64::memory::USER_STACK_SIZE
+                        - 4096,
+                ),
+            ),
+            (13u8, None),
+            (6u8, None),
+        ];
+        for (process_id, (expected_vector, expected_fault_address)) in ids.iter().zip(expected) {
             let snapshot = process::snapshot(*process_id)
                 .expect("fault-containment process identity became stale before reap");
             if snapshot.state == process::ProcessState::Zombie {
@@ -1028,8 +1139,12 @@ pub fn wait_for_user_fault_containment_test() {
                         assert!(rip >= 0x0040_0000 && rip < 0x0040_1000);
                         match expected_vector {
                             14 => {
-                                assert!(error_code.is_some());
-                                assert_eq!(fault_address, Some(0x3000_0000));
+                                assert_ne!(
+                                    error_code.expect("#PF exit metadata lost error code") & 4,
+                                    0,
+                                    "user-origin #PF lacks the USER_MODE bit"
+                                );
+                                assert_eq!(fault_address, expected_fault_address);
                             }
                             13 => {
                                 assert!(error_code.is_some());
@@ -1052,11 +1167,206 @@ pub fn wait_for_user_fault_containment_test() {
                 process::reap(*process_id).expect("could not reap faulting Zombie");
                 assert!(process::snapshot(*process_id).is_err());
             }
-            kprintln!("[process-test] #PF/#GP/#UD metadata and Zombie handoff passed");
+            kprintln!("[process-test] #PF/#GP/#UD containment, guards and isolation passed");
             crate::arch::x86_64::qemu::exit_success();
         }
         if pit::ticks().saturating_sub(start_tick) >= 100 {
             kprintln!("[process-test] user-fault tick watchdog expired");
+            crate::arch::x86_64::qemu::exit_failure();
+        }
+        hlt();
+    }
+}
+
+#[cfg(feature = "address-space-isolation-test")]
+pub fn prepare_address_space_isolation_test() {
+    use x86_64::structures::paging::{Page, Size4KiB};
+
+    const PRIVATE_VA: u64 = 0x0010_0000;
+    let mut prepared = [None; 2];
+    let mut frames = [None; 2];
+    for (index, value) in [0xAAu64, 0xBB].into_iter().enumerate() {
+        let process_id = process::reserve(
+            None,
+            if index == 0 {
+                "isolation-a"
+            } else {
+                "isolation-b"
+            },
+            pit::ticks(),
+        )
+        .expect("failed to reserve isolation process");
+        let image = process::elf::process_isolation_elf(value);
+        let (address_space, context, frame) =
+            crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+                let mut address_space = kernel
+                    .create_address_space()
+                    .expect("failed to create isolation address space");
+                crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                    .expect("failed to map isolation user stack");
+                let image = process::elf::load_static_elf(&mut address_space, kernel, &image)
+                    .expect("isolation ELF fixture rejected");
+                let page = Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(PRIVATE_VA))
+                    .expect("private isolation VA is not page aligned");
+                let frame = address_space
+                    .map_new_user_page(
+                        kernel,
+                        page,
+                        crate::arch::x86_64::memory::Permissions::USER_DATA,
+                    )
+                    .expect("failed to map private isolation page");
+                address_space
+                    .write_user_page(kernel, page, 0, &value.to_le_bytes())
+                    .expect("failed to initialize private isolation data");
+                let context = address_space
+                    .validate_user_context(
+                        kernel,
+                        image.entry,
+                        crate::arch::x86_64::memory::USER_STACK_TOP,
+                    )
+                    .expect("isolation context invalid");
+                (address_space, context, frame)
+            });
+        process::install_address_space(process_id, address_space)
+            .expect("could not attach isolation address space");
+        let task_id =
+            prepare_user_task(process_id, context).expect("could not prepare isolation user Task");
+        process::install_primary_task(process_id, task_id)
+            .expect("could not attach isolation user Task");
+        publish_prepared_user_task(task_id).expect("could not publish isolation process");
+        prepared[index] = Some(process_id);
+        frames[index] = Some(frame);
+    }
+    assert_ne!(frames[0], frames[1], "same user VA aliases physical frame");
+    ADDRESS_ISOLATION_IDS
+        .call_once(|| prepared.map(|id| id.expect("isolation process ID missing")));
+    kprintln!("[process-test] same user VA mapped to private A/B frames");
+}
+
+/// Fills the scheduler with two already-Ready kernel smoke Tasks and six
+/// prepared (non-runnable) process Tasks. The seventh process can reserve a
+/// ProcessId and AddressSpace but must receive a typed scheduler-capacity
+/// error without publishing a partial process. It then verifies the separate
+/// eight-slot process-table bound and rolls back all Creating/prepared state.
+#[cfg(feature = "process-capacity-test")]
+pub fn run_process_capacity_test() {
+    use x86_64::structures::paging::{Page, PageSize, Size4KiB};
+
+    let mut processes = [None; 6];
+    let mut tasks = [None; 6];
+    for index in 0..6 {
+        let process_id = process::reserve(None, "capacity-test", pit::ticks())
+            .expect("process capacity reached before expected slot");
+        let (address_space, context) =
+            crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+                let mut address_space = kernel
+                    .create_address_space()
+                    .expect("could not build capacity-test root");
+                let stack = crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                    .expect("could not map capacity-test stack");
+                let entry = 0x0040_0000 + index as u64 * Size4KiB::SIZE;
+                address_space
+                    .map_new_user_page(
+                        kernel,
+                        Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(entry)).unwrap(),
+                        crate::arch::x86_64::memory::Permissions::USER_EXECUTABLE,
+                    )
+                    .expect("could not map capacity-test code page");
+                let context = address_space
+                    .validate_user_context(kernel, entry, stack.top)
+                    .expect("capacity-test context invalid");
+                (address_space, context)
+            });
+        process::install_address_space(process_id, address_space)
+            .expect("could not attach capacity-test root");
+        let task_id = prepare_user_task(process_id, context)
+            .expect("scheduler filled before six process Tasks");
+        process::install_primary_task(process_id, task_id)
+            .expect("could not attach capacity-test Task");
+        processes[index] = Some(process_id);
+        tasks[index] = Some(task_id);
+    }
+
+    let seventh = process::reserve(None, "capacity-seventh", pit::ticks())
+        .expect("seventh process identity should fit its independent table");
+    let (address_space, context) =
+        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut address_space = kernel
+                .create_address_space()
+                .expect("could not build seventh process root");
+            let stack = crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
+                .expect("could not map seventh process stack");
+            let entry = 0x0040_0000;
+            address_space
+                .map_new_user_page(
+                    kernel,
+                    Page::<Size4KiB>::from_start_address(x86_64::VirtAddr::new(entry)).unwrap(),
+                    crate::arch::x86_64::memory::Permissions::USER_EXECUTABLE,
+                )
+                .expect("could not map seventh process code page");
+            let context = address_space
+                .validate_user_context(kernel, entry, stack.top)
+                .expect("seventh process context invalid");
+            (address_space, context)
+        });
+    process::install_address_space(seventh, address_space)
+        .expect("could not attach seventh process root");
+    assert_eq!(
+        prepare_user_task(seventh, context),
+        Err(SpawnError::TaskTableFull)
+    );
+    process::abort_creation(seventh).expect("could not roll back seventh process");
+
+    let eighth = process::reserve(None, "capacity-eighth", pit::ticks())
+        .expect("process table should accept slot eight after task rollback");
+    let ninth = process::reserve(None, "capacity-ninth", pit::ticks())
+        .expect("process table should accept its eighth live process identity");
+    assert_eq!(
+        process::reserve(None, "capacity-overflow", pit::ticks()),
+        Err(process::ProcessError::TableFull)
+    );
+
+    for (process_id, task_id) in processes.into_iter().zip(tasks) {
+        cancel_prepared_task(task_id.expect("capacity test lost prepared task"))
+            .expect("could not cancel prepared capacity-test task");
+        process::abort_creation(process_id.expect("capacity test lost process ID"))
+            .expect("could not abort capacity-test process");
+    }
+    process::abort_creation(eighth).expect("could not abort eighth capacity-test process");
+    process::abort_creation(ninth).expect("could not abort final capacity-test process");
+    kprintln!("[process-test] mixed task/process capacity and rollback passed");
+}
+
+#[cfg(feature = "address-space-isolation-test")]
+pub fn wait_for_address_space_isolation_test() {
+    let ids = ADDRESS_ISOLATION_IDS
+        .get()
+        .expect("isolation process IDs were not initialized");
+    let start_tick = pit::ticks();
+    loop {
+        let mut zombies = 0;
+        for process_id in ids {
+            let snapshot = process::snapshot(*process_id)
+                .expect("isolation process identity became stale before reap");
+            if snapshot.state == process::ProcessState::Zombie {
+                assert_eq!(
+                    snapshot.exit_reason,
+                    Some(ProcessExitReason::Exited { status: 0 }),
+                    "user process observed another address space's value"
+                );
+                assert!(snapshot.cpu_ticks > 0);
+                zombies += 1;
+            }
+        }
+        if zombies == ids.len() {
+            for process_id in ids {
+                process::reap(*process_id).expect("could not reap isolation process");
+            }
+            kprintln!("[process-test] same-VA process isolation across timer switches passed");
+            crate::arch::x86_64::qemu::exit_success();
+        }
+        if pit::ticks().saturating_sub(start_tick) >= 100 {
+            kprintln!("[process-test] address-space isolation watchdog expired");
             crate::arch::x86_64::qemu::exit_failure();
         }
         hlt();
@@ -1071,12 +1381,30 @@ pub fn wait_for_process_smoke_test() {
     while PROCESS_SMOKE_ACTIVE.load(Ordering::Acquire) {
         if let Ok(snapshot) = process::snapshot(process_id) {
             if snapshot.state == process::ProcessState::Zombie {
+                assert!(
+                    snapshot.cpu_ticks > 0,
+                    "process CPU accounting did not advance"
+                );
+                assert!(process::snapshot_all().iter().flatten().any(|entry| {
+                    entry.id == process_id && entry.state == process::ProcessState::Zombie
+                }));
                 match snapshot.exit_reason {
                     Some(ProcessExitReason::Exited { status: 0 }) => {
                         kprintln!("[process-test] userspace getpid passed");
                         kprintln!("[process-test] exit handoff reached Zombie safely");
+                        let old_pid = snapshot.pid;
                         process::reap(process_id).expect("could not reap process-smoke Zombie");
                         assert!(process::snapshot(process_id).is_err());
+                        let replacement = process::reserve(None, "reuse-check", pit::ticks())
+                            .expect("reaped process slot could not be reused");
+                        let replacement_snapshot = process::snapshot(replacement)
+                            .expect("replacement process snapshot missing");
+                        assert_eq!(replacement.slot(), process_id.slot());
+                        assert!(replacement.generation() > process_id.generation());
+                        assert_ne!(replacement_snapshot.pid, old_pid);
+                        process::abort_creation(replacement)
+                            .expect("could not roll back process ID reuse fixture");
+                        kprintln!("[process-test] stale ProcessId rejected after reuse");
                         PROCESS_SMOKE_ACTIVE.store(false, Ordering::Release);
                         crate::arch::x86_64::qemu::exit_success();
                     }

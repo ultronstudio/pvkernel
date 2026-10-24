@@ -101,6 +101,29 @@ timeout 60 cargo run --features user-copy-test -- --headless-test
 # saved fault metadata and deferred Zombie completion before reaping them.
 timeout 60 cargo run --features user-fault-containment-test -- --headless-test
 
+# User stack guard and supervisor mapping denial are included in the process
+# fault-containment scenario.
+timeout 60 cargo run --features user-stack-guard-fault-test -- --headless-test
+timeout 60 cargo run --features user-kernel-isolation-test -- --headless-test
+
+# Two process roots map the same private VA to different frames and values;
+# user code checks its value while PIT scheduling switches between them.
+timeout 60 cargo run --features address-space-isolation-test -- --headless-test
+
+# Two kernel Tasks plus six prepared process Tasks exhaust the shared task
+# table; a seventh process gets a typed failure and process-table capacity is
+# checked independently.
+timeout 60 cargo run --features process-capacity-test -- --headless-test
+
+# Embedded ELF exit status, non-returning exit, Zombie/reap and stale-ID
+# rejection after slot reuse.
+timeout 60 cargo run --features process-exit-test -- --headless-test
+timeout 60 cargo run --features process-id-reuse-test -- --headless-test
+
+# Valid static ELF permissions/BSS and malformed-input rejection.
+timeout 60 cargo run --features elf-loader-test -- --headless-test
+timeout 60 cargo run --features elf-malformed-test -- --headless-test
+
 # Expected task stack lower-guard page fault.
 timeout 60 cargo run --features task-stack-guard-fault-test -- --headless-test
 

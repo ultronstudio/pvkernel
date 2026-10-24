@@ -203,6 +203,12 @@ impl ProcessTable {
         name: ProcessName,
         created_tick: u64,
     ) -> Result<ProcessId, ProcessError> {
+        if let Some(parent_id) = parent {
+            let parent_slot = self.slot_for(parent_id)?;
+            if parent_slot.state != ProcessState::Alive {
+                return Err(ProcessError::InvalidTransition);
+            }
+        }
         let mut available = None;
         for (index, slot) in self.slots.iter_mut().enumerate() {
             if slot.state != ProcessState::Vacant {
@@ -403,7 +409,7 @@ impl ProcessTable {
 
     fn add_cpu_tick(&mut self, id: ProcessId) -> Result<(), ProcessError> {
         let slot = self.slot_for_mut(id)?;
-        if slot.state != ProcessState::Alive {
+        if !matches!(slot.state, ProcessState::Alive | ProcessState::Exiting) {
             return Err(ProcessError::InvalidTransition);
         }
         slot.cpu_ticks = slot.cpu_ticks.saturating_add(1);
@@ -487,6 +493,40 @@ pub fn snapshot(id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         .get()
         .expect("process subsystem used before init");
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().snapshot(id))
+}
+
+/// Returns a bounded point-in-time view of every non-vacant, non-retired
+/// process slot. Empty array entries represent Vacant or permanently Retired
+/// slots. The fixed result requires no heap allocation and is suitable as an
+/// internal source for future process-monitoring services.
+pub fn snapshot_all() -> [Option<ProcessSnapshot>; MAX_PROCESSES] {
+    let table = PROCESS_TABLE
+        .get()
+        .expect("process subsystem used before init");
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let table = table.lock();
+        core::array::from_fn(|index| {
+            let slot = &table.slots[index];
+            if matches!(slot.state, ProcessState::Vacant | ProcessState::Retired) {
+                return None;
+            }
+            let id = ProcessId {
+                slot: index as u8,
+                generation: slot.generation,
+            };
+            Some(slot.snapshot(id))
+        })
+    })
+}
+
+pub(crate) fn account_cpu_tick(id: ProcessId) {
+    if let Some(table) = PROCESS_TABLE.get() {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            // Accounting saturates so a process running for the entire boot
+            // lifetime never wraps its historical CPU-time counter.
+            let _ = table.lock().add_cpu_tick(id);
+        });
+    }
 }
 
 pub(crate) fn pid(id: ProcessId) -> Result<Pid, ProcessError> {
@@ -644,5 +684,31 @@ fn run_model_self_tests() {
     assert_eq!(
         last_pid.reserve(None, name, 1),
         Err(ProcessError::PidExhausted)
+    );
+
+    let mut parent_table = ProcessTable::new();
+    let parent = parent_table.reserve(None, name, 0).unwrap();
+    assert_eq!(
+        parent_table.reserve(Some(parent), name, 1),
+        Err(ProcessError::InvalidTransition),
+        "Creating process cannot parent another process"
+    );
+    parent_table
+        .transition(parent, ProcessState::Creating, ProcessState::Alive)
+        .unwrap();
+    let child = parent_table.reserve(Some(parent), name, 1).unwrap();
+    assert_eq!(parent_table.snapshot(child).unwrap().parent, Some(parent));
+    parent_table.abort_creation(child).unwrap();
+    parent_table
+        .begin_exit(parent, ProcessExitReason::Exited { status: 0 }, 2)
+        .unwrap();
+    parent_table
+        .transition(parent, ProcessState::Exiting, ProcessState::Zombie)
+        .unwrap();
+    parent_table.reap(parent).unwrap();
+    assert_eq!(
+        parent_table.reserve(Some(parent), name, 3),
+        Err(ProcessError::InvalidId),
+        "stale parent ProcessId was accepted"
     );
 }
