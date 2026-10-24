@@ -14,6 +14,12 @@ on:
         description: 'RC number, e.g. "1" for v0.0.7-rc.1.'
         required: true
         default: "1"
+      commit:
+        description: >-
+          Full commit SHA being released. Must equal the commit this
+          workflow run checks out. Dispatch only from main and enter the
+          matching SHA shown for that branch.
+        required: true
 
 permissions:
   contents: read
@@ -33,6 +39,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       rc: ${{ steps.version.outputs.rc }}
       tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,10 +51,28 @@ jobs:
 
       - name: Validate inputs and derive tag
         id: version
+        env:
+          ACTUAL_REF: ${{ github.ref }}
+          ACTUAL_SHA: ${{ github.sha }}
+          REQUESTED_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
           version="${{ inputs.version }}"
           rc="${{ inputs.rc }}"
+
+          if [ "$ACTUAL_REF" != "refs/heads/main" ]; then
+            echo "::error::release candidates must be dispatched from main (got $ACTUAL_REF)" >&2
+            exit 1
+          fi
+          if ! [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit must be a full 40-character lowercase SHA" >&2
+            exit 1
+          fi
+          checked_out_sha=$(git rev-parse HEAD)
+          if [ "$ACTUAL_SHA" != "$REQUESTED_COMMIT" ] || [ "$checked_out_sha" != "$REQUESTED_COMMIT" ]; then
+            echo "::error::selected ref resolves to $ACTUAL_SHA (checkout $checked_out_sha), expected $REQUESTED_COMMIT" >&2
+            exit 1
+          fi
 
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::version '$version' is not a bare X.Y.Z semantic version" >&2
@@ -63,6 +88,7 @@ jobs:
             echo "version=$version"
             echo "rc=$rc"
             echo "tag=$tag"
+            echo "commit=$REQUESTED_COMMIT"
           } >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $tag"
 
@@ -226,6 +252,6 @@ jobs:
           gh release create "$tag" \
             --title "pvKernel ${tag}" \
             --prerelease \
-            --target "${{ github.sha }}" \
+            --target "${{ needs.validate.outputs.commit }}" \
             --notes "Release candidate for pvKernel v${version}. No stability guarantee; may contain release-blocking defects. See CHANGELOG.md for the v${version} entry." \
             release-artifacts/*
