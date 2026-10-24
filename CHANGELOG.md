@@ -14,7 +14,7 @@
   QEMU coverage for task execution, timer preemption, capacity/reuse, stale
   IDs, and task stack guard faults.
 
-## [0.0.7] - Unreleased
+## [0.0.7] - 2026-10-24
 
 ### Added
 
