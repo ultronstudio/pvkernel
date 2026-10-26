@@ -1,6 +1,7 @@
 name: Build pvKernel release artifacts
 description: >-
-  Builds the real release-profile kernel ELF and UEFI disk image, then
+  Builds the real release-profile kernel and userspace init ELFs, constructs
+  a deterministic initrd, and packages the bootable UEFI disk image, then
   generates an SPDX SBOM, SHA-256 checksums, and a release manifest from
   those actual outputs. Used identically by the release-candidate and
   stable release workflows so both produce artifacts the same way.
@@ -58,10 +59,10 @@ runs:
       shell: bash
       # This is the same build.rs-driven process as `cargo build`/`cargo
       # run` in every other job: compiling the root `pvkernel-runner`
-      # package compiles the `kernel` artifact dependency first, then
-      # build.rs calls `bootloader::UefiBoot::create_disk_image` to embed
-      # it into a UEFI disk image. Cargo's JSON messages identify the
-      # authoritative OUT_DIR; this action does not infer Cargo's layout.
+      # package builds the kernel and userspace-init artifact dependencies,
+      # then build.rs creates the initrd and calls the pinned bootloader's
+      # ramdisk/image APIs. Cargo's JSON messages identify the authoritative
+      # OUT_DIR; this action does not infer Cargo's layout.
       run: |
         set -euo pipefail
 
@@ -78,6 +79,7 @@ runs:
 
         out_dir="$(python3 scripts/cargo_release_out_dir.py out-dir "$package_id" "$build_messages")"
         kernel_elf="$out_dir/pvkernel-kernel.elf"
+        initrd="$out_dir/pvkernel-initrd.cpio"
         uefi_img="$out_dir/pvkernel-uefi.img"
 
         if [ ! -f "$kernel_elf" ]; then
@@ -88,6 +90,11 @@ runs:
           echo "::error::pvkernel-kernel.elf in Cargo-reported pvkernel-runner OUT_DIR is empty" >&2
           exit 1
         fi
+        if [ ! -s "$initrd" ]; then
+          echo "::error::pvkernel-initrd.cpio is missing or empty from Cargo-reported pvkernel-runner OUT_DIR" >&2
+          exit 1
+        fi
+        python3 scripts/validate_initrd.py "$initrd"
         if [ ! -f "$uefi_img" ]; then
           echo "::error::pvkernel-uefi.img is missing from Cargo-reported pvkernel-runner OUT_DIR" >&2
           exit 1
@@ -111,6 +118,7 @@ runs:
         mkdir -p "$dir"
 
         cp "$kernel_elf" "$dir/pvkernel-${suffix}.elf"
+        cp "$initrd" "$dir/pvkernel-${suffix}-initrd.cpio"
         cp "$uefi_img" "$dir/pvkernel-${suffix}-uefi.img"
 
         echo "dir=$dir" >> "$GITHUB_OUTPUT"

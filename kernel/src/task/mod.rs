@@ -195,8 +195,6 @@ static PROCESS_SMOKE_ID: Once<ProcessId> = Once::new();
 static USER_FAULT_IDS: Once<[ProcessId; 7]> = Once::new();
 #[cfg(feature = "address-space-isolation-test")]
 static ADDRESS_ISOLATION_IDS: Once<[ProcessId; 2]> = Once::new();
-#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
-static RELEASE_SMOKE_ID: Once<ProcessId> = Once::new();
 static SMOKE_A: AtomicU64 = AtomicU64::new(0);
 static SMOKE_B: AtomicU64 = AtomicU64::new(0);
 static SMOKE_A_SP: AtomicU64 = AtomicU64::new(0);
@@ -519,7 +517,7 @@ pub fn run_prepared_user_task_test() {
     kprintln!("[scheduler-test] prepared user task remains non-runnable until process Alive");
 }
 
-#[cfg(any(feature = "qemu-test", feature = "process-capacity-test"))]
+#[allow(dead_code)] // Central process construction needs rollback after task preparation.
 pub fn cancel_prepared_task(id: TaskId) -> Result<(), SpawnError> {
     let scheduler = SCHEDULER.get().ok_or(SpawnError::SchedulerNotInitialized)?;
     interrupts::without_interrupts(|| {
@@ -952,102 +950,12 @@ pub fn prepare_process_smoke_test() {
         .pid
         .get();
     let image = process::elf::process_smoke_elf(pid);
-    let (address_space, context) =
-        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
-            let mut address_space = kernel
-                .create_address_space()
-                .expect("failed to create process-smoke AddressSpace");
-            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
-                .expect("failed to map process-smoke user stack");
-            let image = process::elf::load_static_elf(&mut address_space, kernel, &image)
-                .expect("embedded process-smoke ELF was rejected");
-            let context = address_space
-                .validate_user_context(
-                    kernel,
-                    image.entry,
-                    crate::arch::x86_64::memory::USER_STACK_TOP,
-                )
-                .expect("embedded process-smoke context was invalid");
-            (address_space, context)
-        });
-    process::install_address_space(process_id, address_space)
-        .expect("failed to attach process-smoke AddressSpace");
-    let task_id =
-        prepare_user_task(process_id, context).expect("failed to prepare process-smoke task");
-    process::install_primary_task(process_id, task_id)
-        .expect("failed to attach process-smoke task");
-    publish_prepared_user_task(task_id).expect("failed to publish process-smoke process");
+    process::spawn_reserved_elf(process_id, &image)
+        .expect("embedded process-smoke ELF rejected or publication failed");
     PROCESS_SMOKE_ID.call_once(|| process_id);
     PROCESS_SMOKE_START_TICK.store(pit::ticks(), Ordering::Relaxed);
     PROCESS_SMOKE_ACTIVE.store(true, Ordering::Release);
     kprintln!("[process-test] embedded ELF prepared for PID {pid}");
-}
-
-/// Prepares the small embedded ELF used on ordinary release-safe boots while
-/// pvKernel has no VFS/initrd provider. Its bytes still go through the
-/// normal checked static ELF loader and process publication path.
-#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
-pub fn prepare_release_userspace_smoke() {
-    kprintln!("[process] initializing");
-    kprintln!("[process] process capacity: {}", process::MAX_PROCESSES);
-    kprintln!("[process] address-space isolation ready");
-    kprintln!("[process] loading userspace smoke");
-    let process_id = process::reserve(None, "userspace-smoke", pit::ticks())
-        .expect("could not reserve release userspace smoke process");
-    let pid = process::snapshot(process_id)
-        .expect("release smoke process lacks metadata")
-        .pid
-        .get();
-    let bytes = process::elf::process_smoke_elf(pid);
-    let (address_space, context) =
-        crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
-            let mut address_space = kernel
-                .create_address_space()
-                .expect("could not create release smoke AddressSpace");
-            crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
-                .expect("could not map release smoke user stack");
-            let image = process::elf::load_static_elf(&mut address_space, kernel, &bytes)
-                .expect("embedded release smoke ELF rejected");
-            let context = address_space
-                .validate_user_context(
-                    kernel,
-                    image.entry,
-                    crate::arch::x86_64::memory::USER_STACK_TOP,
-                )
-                .expect("release smoke user context invalid");
-            (address_space, context)
-        });
-    process::install_address_space(process_id, address_space)
-        .expect("could not attach release smoke AddressSpace");
-    let task_id =
-        prepare_user_task(process_id, context).expect("could not prepare release smoke Task");
-    process::install_primary_task(process_id, task_id)
-        .expect("could not attach release smoke primary Task");
-    publish_prepared_user_task(task_id).expect("could not publish release smoke process");
-    RELEASE_SMOKE_ID.call_once(|| process_id);
-}
-
-#[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
-pub fn wait_for_release_userspace_smoke() {
-    let process_id = *RELEASE_SMOKE_ID
-        .get()
-        .expect("release smoke process was not prepared");
-    loop {
-        if let Ok(snapshot) = process::snapshot(process_id)
-            && snapshot.state == process::ProcessState::Zombie
-        {
-            match snapshot.exit_reason {
-                Some(ProcessExitReason::Exited { status: 0 }) => {
-                    kprintln!("[process] userspace smoke exited cleanly");
-                    process::reap(process_id).expect("could not reap release smoke process");
-                    kprintln!("[process] userspace smoke passed");
-                    return;
-                }
-                reason => panic!("release userspace smoke failed: {reason:?}"),
-            }
-        }
-        hlt();
-    }
 }
 
 #[cfg(feature = "user-fault-containment-test")]
@@ -1072,31 +980,8 @@ pub fn prepare_user_fault_containment_test() {
             Some(address) => process::elf::process_fault_elf_at(vector, address),
             None => process::elf::process_fault_elf(vector),
         };
-        let (address_space, context) =
-            crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
-                let mut address_space = kernel
-                    .create_address_space()
-                    .expect("failed to create fault-containment AddressSpace");
-                crate::arch::x86_64::memory::UserStack::map(&mut address_space, kernel)
-                    .expect("failed to map fault-containment user stack");
-                let image = process::elf::load_static_elf(&mut address_space, kernel, &image)
-                    .expect("fault-containment ELF fixture rejected");
-                let context = address_space
-                    .validate_user_context(
-                        kernel,
-                        image.entry,
-                        crate::arch::x86_64::memory::USER_STACK_TOP,
-                    )
-                    .expect("fault-containment context invalid");
-                (address_space, context)
-            });
-        process::install_address_space(process_id, address_space)
-            .expect("could not attach fault-containment address space");
-        let task_id = prepare_user_task(process_id, context)
-            .expect("could not prepare fault-containment task");
-        process::install_primary_task(process_id, task_id)
-            .expect("could not attach fault-containment task");
-        publish_prepared_user_task(task_id).expect("could not publish fault-containment process");
+        process::spawn_reserved_elf(process_id, &image)
+            .expect("fault-containment ELF rejected or publication failed");
         ids[index] = Some(process_id);
         kprintln!("[process-test] prepared CPL3 fault fixture vector {vector}");
     }
@@ -1142,7 +1027,7 @@ pub fn wait_for_user_fault_containment_test() {
                         rip,
                     } => {
                         assert_eq!(vector, expected_vector);
-                        assert!(rip >= 0x0040_0000 && rip < 0x0040_1000);
+                        assert!((0x0040_0000..0x0040_1000).contains(&rip));
                         match expected_vector {
                             14 => {
                                 assert_ne!(

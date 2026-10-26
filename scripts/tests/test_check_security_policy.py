@@ -309,9 +309,15 @@ class OutputSafetyTests(PolicyTestCase):
             self.assertNotIn("::", e)
 
     def test_hostile_filename_is_sanitized(self):
-        self.write(".github/workflows/::error::x.yml", "name: t\non: push\n")
-        for e in self.errors():
-            self.assertNotIn("::", e)
+        # `%` and `]` are valid on Windows and still exercise the path
+        # sanitization applied before filenames are included in diagnostics.
+        self.write(".github/workflows/evil%5D.yml", "name: t\non: push\n")
+        errors = self.errors()
+        self.assertTrue(errors)
+        self.assertTrue(any("evil?5D.yml" in error for error in errors))
+        for error in errors:
+            self.assertNotIn("::", error)
+            self.assertNotIn("evil%5D.yml", error)
 
 
 class MainTests(PolicyTestCase):

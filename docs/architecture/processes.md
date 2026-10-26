@@ -2,8 +2,8 @@
 
 **Status:** authoritative design and current implementation model for
 pvKernel 0.0.9, merged on `main` and passed through the formal pre-release
-audit with no P0, P1, or P2 blockers. Version 0.0.9 remains unreleased, and
-RC1 has not been created. The stable-baseline sections describe pvKernel 0.0.8
+audit with no P0, P1, or P2 blockers. Version 0.0.9 was released on
+2026-10-24. The stable-baseline sections describe pvKernel 0.0.8
 at `2e99b6a16e3c3bec7fdde88ae580c1d76cba8e56`. Phase A process identity,
 Phase B boot-mapping audit/inactive-root construction, Phase C user-stack/
 RSP0 support, Phase D checked static ELF loading, and the Phase E prepared
@@ -23,8 +23,10 @@ stack; its QEMU scenario observes #PF/#GP/#UD/#NM, stack-guard and supervisor-
 mapping faults, then reaps their Zombies. Phase K adds saturating PIT-based
 process CPU accounting, a fixed-size `snapshot_all` API, real same-VA/
 different-frame user-process switching, and mixed scheduler/process capacity
-validation. Ordinary boots now run an embedded static userspace smoke ELF
-through the same process and loader path.
+validation. In 0.0.10 the normal boot executable is
+`Boot:\\pvOS\\System\\Init` from the bootloader-delivered CPIO-backed `Boot:`
+volume; it uses the same process and loader path described here. The 0.0.9
+embedded smoke fixture remains test-only.
 
 ## 1. Scope and goals
 
@@ -316,8 +318,9 @@ System Monitor. No waitpid is implemented now.
 ## 14. Parent and exit reason
 
 Store `parent: Option<ProcessId>`, not only PID. Root/test process may have
-None. A stale parent handle remains safely detectable; future PID 1/service
-manager may adopt orphans by updating it. No init semantics are implemented.
+None. A stale parent handle remains safely detectable. PID 1 is the boot init
+process in 0.0.10, but orphan adoption and service-manager policy are not
+implemented.
 
 Start `ProcessExitReason` with `Exited { status: i32 }` and
 `Fault { vector: u8, error_code: Option<u64>, fault_address: Option<u64>,
@@ -710,9 +713,9 @@ mandatory; do not schedule userspace if they cannot prove shared mappings.
 
 ## 32. Explicit non-goals
 
-No VFS, initrd, filesystem, `/bin/init`, FDs, fork, general exec/spawn syscall,
-dynamic linker, shared libraries, PT_INTERP, PIE/ASLR unless reconsidered,
-userspace multithreading API, signals, pipes, PTY, shared memory, general
+No userspace file descriptors or general filesystem syscalls, fork, general
+exec/spawn syscall, dynamic linker, shared libraries, PT_INTERP, PIE/ASLR
+unless reconsidered, userspace multithreading API, signals, pipes, PTY, shared memory, general
 IPC, user heap, brk, mmap, demand paging, COW, swap, general frame reclamation,
 block/storage stack, networking, users/groups/security database, capability
 manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
@@ -764,8 +767,10 @@ QEMU review. Keep these constraints visible in future work:
 * Eight process slots share the existing eight scheduler Task slots with
   kernel Tasks; process table capacity does not imply eight simultaneously
   runnable user processes.
-* The embedded static smoke ELF is a temporary provider until VFS/initrd
-  supplies bytes; the loader API remains byte-slice based.
+* Ordinary boot resolves `Boot:\\pvOS\\System\\Init` from the temporary
+  read-only `Boot:` volume and passes its immutable bytes to the existing
+  byte-slice ELF loader. Generated static smoke ELFs remain deterministic
+  test fixtures, not the production init provider.
 
 The `int 0x80` process ABI remains experimental. No ABI compatibility promise
 is made before 0.1.0.

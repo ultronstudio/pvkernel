@@ -340,9 +340,10 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bootloader_api",
+ "pvkernel-fs-core",
  "spin",
  "uart_16550",
  "x86_64",
@@ -452,12 +453,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pvkernel-fs-core"
+version = "0.0.10"
+
+[[package]]
+name = "pvkernel-init"
+version = "0.0.10"
+
+[[package]]
 name = "pvkernel-runner"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bootloader",
  "kernel",
  "ovmf-prebuilt",
+ "pvkernel-init",
 ]
 
 [[package]]

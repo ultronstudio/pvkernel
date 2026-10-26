@@ -53,8 +53,10 @@ cargo build
 This builds the `kernel` crate for the `x86_64-unknown-none` target as a
 Cargo artifact dependency (see [docs/dependencies.md](../dependencies.md) for
 why `bindeps` is enabled in [.cargo/config.toml](../../.cargo/config.toml)),
-then builds the root `pvkernel-runner` binary and produces a UEFI disk image
-via `build.rs`.
+then builds the separately targeted `userspace/init` ELF, then builds the
+root `pvkernel-runner` binary. Its `build.rs` constructs the deterministic
+CPIO `newc` initrd containing `pvOS/System/Init` and passes it through the pinned bootloader's
+`UefiBoot::set_ramdisk` API before creating the UEFI disk image.
 
 ## 5. Running
 

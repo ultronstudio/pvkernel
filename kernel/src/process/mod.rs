@@ -105,6 +105,80 @@ pub enum ProcessError {
     InvalidName,
 }
 
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpawnElfError {
+    Process(ProcessError),
+    Memory(AddressSpaceError),
+    Elf(elf::ElfError),
+    Task(crate::task::SpawnError),
+}
+
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+impl From<ProcessError> for SpawnElfError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+impl From<AddressSpaceError> for SpawnElfError {
+    fn from(error: AddressSpaceError) -> Self {
+        Self::Memory(error)
+    }
+}
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+impl From<elf::ElfError> for SpawnElfError {
+    fn from(error: elf::ElfError) -> Self {
+        Self::Elf(error)
+    }
+}
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+impl From<crate::task::SpawnError> for SpawnElfError {
+    fn from(error: crate::task::SpawnError) -> Self {
+        Self::Task(error)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessSnapshot {
     pub id: ProcessId,
@@ -427,6 +501,70 @@ pub fn init() {
     run_model_self_tests();
     kprintln!("[process] process capacity: {MAX_PROCESSES}");
     kprintln!("[process] identity and lifecycle initialized");
+}
+
+/// Creates and atomically publishes a user process from an immutable ELF
+/// image. All callers share this path so filesystem and test images receive
+/// identical ELF/W^X, stack, address-space, and scheduler publication checks.
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test"
+))]
+pub fn spawn_elf(
+    parent: Option<ProcessId>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<ProcessId, SpawnElfError> {
+    let id = reserve(parent, name, crate::arch::x86_64::pit::ticks())?;
+    spawn_reserved_elf(id, bytes)
+}
+
+/// Finishes construction for a reservation that a deterministic fixture
+/// created first in order to bake its PID into the test ELF.
+#[cfg(any(
+    not(any(feature = "qemu-test", feature = "userspace-test")),
+    feature = "initrd-boot-test",
+    feature = "initrd-missing-init-test",
+    feature = "initrd-invalid-init-test",
+    feature = "initrd-wx-init-test",
+    feature = "process-smoke-test",
+    feature = "user-fault-containment-test"
+))]
+pub(crate) fn spawn_reserved_elf(id: ProcessId, bytes: &[u8]) -> Result<ProcessId, SpawnElfError> {
+    let construction = (|| {
+        let (space, context) = crate::arch::x86_64::memory::with_kernel_address_space(|kernel| {
+            let mut space = kernel.create_address_space()?;
+            crate::arch::x86_64::memory::UserStack::map(&mut space, kernel)?;
+            let image = elf::load_static_elf(&mut space, kernel, bytes)?;
+            let context = space.validate_user_context(
+                kernel,
+                image.entry,
+                crate::arch::x86_64::memory::USER_STACK_TOP,
+            )?;
+            Ok::<_, SpawnElfError>((space, context))
+        })?;
+        install_address_space(id, space)?;
+        let task = crate::task::prepare_user_task(id, context)?;
+        if let Err(error) = install_primary_task(id, task) {
+            let _ = crate::task::cancel_prepared_task(task);
+            return Err(error.into());
+        }
+        if let Err(error) = crate::task::publish_prepared_user_task(task) {
+            let _ = crate::task::cancel_prepared_task(task);
+            return Err(error.into());
+        }
+        Ok(id)
+    })();
+    if construction.is_err() {
+        // The process remains Creating until publication; abort invalidates
+        // its identity and drops the owned address space. Physical frames
+        // remain monotonic by the established 0.0.9 allocator policy.
+        let _ = abort_creation(id);
+    }
+    construction
 }
 
 fn with_table<R>(f: impl FnOnce(&mut ProcessTable) -> R) -> R {

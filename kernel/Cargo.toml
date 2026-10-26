@@ -79,9 +79,18 @@ elf-loader-test = ["qemu-test"]
 elf-malformed-test = ["qemu-test"]
 task-stack-guard-fault-test = ["qemu-test"]
 task-capacity-test = []
+initrd-boot-test = ["qemu-test"]
+initrd-missing-test = ["qemu-test"]
+initrd-corrupt-test = ["qemu-test"]
+initrd-missing-init-test = ["qemu-test"]
+initrd-invalid-init-test = ["qemu-test"]
+initrd-wx-init-test = ["qemu-test"]
+initrd-missing-volume-test = ["qemu-test"]
+initrd-volume-registration-test = ["qemu-test"]
 
 [dependencies]
 bootloader_api = "=0.11.17"
+pvkernel-fs-core = { path = "fs-core" }
 spin = "0.12.3"
 uart_16550 = "0.4.0"
 x86_64 = "0.15.2"

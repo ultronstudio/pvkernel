@@ -11,7 +11,7 @@ written in Rust and developed as the foundation of pvOS.
 
 ## Current milestone
 
-Version: `0.0.9` — Processes + Address Spaces + Userspace Foundation
+Version: `0.0.10` — VFS + Initrd + Init Process
 
 Implemented:
 
@@ -74,8 +74,17 @@ Implemented:
   and same-VA process isolation
 * dedicated user stacks and per-task supervisor kernel-entry stacks, with
   TSS.RSP0 updates and CPL3 timer preemption
-* checked static ELF64 loading with W^X, zeroed BSS/pages, and an embedded
-  userspace smoke executable on normal boot
+* checked static ELF64 loading with W^X and zeroed BSS/pages
+* volume-aware bounded VFS foundation with a fixed-capacity volume registry
+* bootloader-delivered read-only CPIO `newc` initrd registered as `Boot:`
+* archive-backed regular-file reads through volume-qualified paths
+* separately built `Boot:\\pvOS\\System\\Init`, loaded through the existing
+  ELF policy as numeric PID 1 and entered at CPL3 on ordinary boot
+
+Volume names match without ASCII case (`Boot:`, `boot:`, and `BOOT:` identify
+the same volume). Path components remain UTF-8 and case-preserving; the VFS
+does not change component case or impose one matching policy on every
+filesystem. The Boot:/CPIO provider uses exact case-sensitive matching.
 * provisional `getpid`/`exit`, checked user-copy APIs, and process-level
   #PF/#GP/#UD containment
 * deterministic QEMU process, isolation, capacity, ELF, user-copy, and fault
@@ -93,9 +102,14 @@ Not implemented:
 * dynamic heap growth, per-process heaps, or a slab allocator
 * dynamic task stack growth, task join, blocking, sleep, or priorities
 * APIC, SMP, and multicore scheduling
-* VFS, initrd, filesystem, `/bin/init`, or file descriptors
+* userspace file descriptors or general `open`/`read`/`write` syscalls
+* persistent `C:` system volume, disk drivers, pvFS, NTFS, exFAT, FAT32, or
+  other disk filesystems
+* writable filesystems, block devices, persistent storage, or shell
 * fork, general exec/spawn syscall, dynamic linking, shared libraries, PIE, or
   relocations
+* PVX executable format, PVAPP application bundles, PVPKG packages, or package
+  management
 * userspace thread API, signals, pipes, PTY, shared memory, or general IPC
 * user heap, `brk`, `mmap`, demand paging, copy-on-write, swap, or general
   physical-frame reclamation
@@ -103,7 +117,7 @@ Not implemented:
   capabilities, or GUI/desktop
 * device drivers beyond serial, framebuffer, PIC, and PIT
 
-pvKernel's 0.0.9 process and syscall interfaces are experimental. It does not
+pvKernel's process and syscall interfaces are experimental. It does not
 claim production readiness, general hardware support, a stable userspace ABI,
 or readiness as a general-purpose kernel.
 
@@ -179,19 +193,26 @@ kernel_main
     ├── PIC remap + PIT configuration
     ├── memory-mapping smoke test
     ├── scheduler and process tables
-    ├── audited address spaces and userspace smoke ELF
+    ├── validated CPIO initrd registered as Boot:
+    ├── Boot:\\pvOS\\System\\Init via checked ELF loader as PID 1
     ├── framebuffer
     ├── controlled breakpoint test
     ├── timer interrupt verification and process/task preemption
     └── interrupt-enabled idle loop
 ```
 
-The bootloader is currently responsible only for loading the kernel and
-providing initial boot information. Kernel subsystems and operating-system
-services are implemented by pvKernel itself. See
+The bootloader loads the kernel and independent initrd, exposing the ramdisk
+mapping through `BootInfo`. pvKernel validates the archive, registers it as
+the temporary `Boot:` volume, then loads
+`Boot:\\pvOS\\System\\Init`. This does not imply a persistent `C:` volume,
+Windows path compatibility, or Windows filesystem support. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for details.
 
 ## Documentation
+
+* [docs/architecture/initrd.md](docs/architecture/initrd.md) — Boot: initrd transport and CPIO format
+* [docs/architecture/vfs.md](docs/architecture/vfs.md) — volume registry, VFS providers, and path rules
+* [docs/development/initrd-testing.md](docs/development/initrd-testing.md) — Boot: validation and PID 1 test
 
 * [ARCHITECTURE.md](ARCHITECTURE.md) — current kernel architecture
 * [docs/architecture/boot.md](docs/architecture/boot.md) — boot flow

@@ -108,7 +108,7 @@ remain future work.
 * QEMU coverage for scheduler operation, true timer preemption, stack guards,
   and capacity/reuse
 
-## 0.0.9 — Processes and Userspace Address Spaces (implemented; unreleased)
+## 0.0.9 — Processes and Userspace Address Spaces (released)
 
 * generation-safe ProcessId handles, monotonic PIDs, bounded process table,
   parent identity, Zombie/reap lifecycle, and process snapshots
@@ -125,15 +125,22 @@ remain future work.
 * no stable userspace ABI is implied; first meaningful compatibility
   checkpoint remains 0.1.0
 
-## 0.0.10 — VFS and Initial Ramdisk
+## 0.0.10 — VFS and Initial Ramdisk (implemented; unreleased)
 
-* VFS foundation
-* initrd and root filesystem foundation
+* bounded volume-qualified path parsing and an eight-entry volume registry
+* bootloader-delivered CPIO `newc` initrd registered as the temporary `Boot:` volume
+* `Boot:\\pvOS\\System\\Init` loaded through the existing static ELF64 policy as PID 1
+* deterministic parser/path/provider/volume/QEMU validation
 
 ## 0.1.0 — First pvOS-Ready Kernel Foundation
 
 A kernel foundation capable of supporting early pvOS userspace development.
 This milestone is not a production-ready or general-purpose release.
+
+Persistent storage, block and partition discovery, filesystem drivers (pvFS,
+NTFS, exFAT, FAT32), and the native pvOS executable/application model remain
+future design and integration work. The VFS is prepared for multiple named
+volumes, but 0.0.10 implements only `Boot:`.
 
 ---
 

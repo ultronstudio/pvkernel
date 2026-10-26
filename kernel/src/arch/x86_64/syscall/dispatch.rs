@@ -79,6 +79,19 @@ pub(super) extern "C" fn pvkernel_syscall_dispatch(frame: *const SyscallFrame) -
 
 /// Implements [`numbers::DEBUG_WRITE_BYTE`].
 fn debug_write_byte(byte: u64) -> u64 {
+    let init_pid_marker =
+        byte as u8 == b'I' && crate::task::current_user_pid().is_some_and(|pid| pid == 1);
+    if init_pid_marker {
+        kprintln!("[init] entered CPL3");
+    }
     kprintln!("[syscall] debug byte from CPL3: {:#04x}", byte as u8);
+    // PID 1 deliberately remains alive in the real init image. The dedicated
+    // boot-chain test therefore reports success at the marker instead of
+    // waiting for kernel_main's bootstrap context to resume from the scheduler.
+    #[cfg(feature = "initrd-boot-test")]
+    if init_pid_marker {
+        kprintln!("[initrd-test] PID 1 CPL3 marker accepted");
+        crate::arch::x86_64::qemu::exit_success();
+    }
     0
 }

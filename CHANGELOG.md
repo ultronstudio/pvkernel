@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.10] - Unreleased
+
+### Added
+
+* Volume-aware bounded VFS paths and a fixed-capacity volume registry.
+* Bootloader-delivered CPIO `newc` initrd registered as the temporary `Boot:`
+  volume, with immutable archive-backed files.
+* Separately built static x86_64 boot init resolved as
+  `Boot:\\pvOS\\System\\Init` and published as numeric PID 1.
+* Deterministic parser, path, provider, volume, artifact, and QEMU scenarios.
+
+### Changed
+
+* Ordinary boot resolves the boot init through `Boot:`; it no longer launches
+  the kernel-generated userspace smoke ELF.
+* User-process ELF construction and publication is centralized in
+  `process::spawn_elf`, and UEFI image construction includes the initrd.
+* Static ELF64 remains the internal bootstrap executable representation; no
+  final pvOS executable/application format is defined.
+
+### Known limitations
+
+* `Boot:` is a temporary read-only volume. There is no persistent `C:`
+  volume, disk filesystem, block/storage driver, pvFS, NTFS, exFAT, or FAT32.
+* There are no userspace file descriptors or general `open`/`read`/`write`
+  syscall ABI, general `exec`/`fork`, dynamic linking, stable userspace ABI,
+  shell, or persistent storage.
+* PVX executables, PVAPP application bundles, PVPKG packages, and package
+  management remain future work. ELF exposure does not claim the final pvOS
+  application format.
+
 ## [0.0.9] - 2026-10-24
 
 ### Added

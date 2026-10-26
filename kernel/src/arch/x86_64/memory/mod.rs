@@ -151,6 +151,7 @@ pub fn init(boot_info: &'static mut BootInfo, framebuffer_mapping: Option<(u64, 
     let ramdisk = boot_info
         .ramdisk_addr
         .into_option()
+        .filter(|_| boot_info.ramdisk_len != 0)
         .map(|start| address_space::MappingRange {
             start,
             len: boot_info.ramdisk_len,

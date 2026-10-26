@@ -110,6 +110,14 @@ jobs:
           - scheduler-preemption-test
           - task-stack-guard-fault-test
           - task-capacity-test
+          - initrd-boot-test
+          - initrd-missing-test
+          - initrd-corrupt-test
+          - initrd-missing-init-test
+          - initrd-invalid-init-test
+          - initrd-wx-init-test
+          - initrd-missing-volume-test
+          - initrd-volume-registration-test
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -148,6 +156,49 @@ jobs:
           description: >-
             Boots headlessly, unmasks the PIT IRQ, enables hardware
             interrupts, and verifies the tick counter advances.
+
+  qemu-initrd-init:
+    name: QEMU / initrd root and PID 1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: initrd-boot-test
+          description: >-
+            Boots the generated UEFI image, validates and mounts its
+            bootloader-delivered newc initrd, loads Boot:\\pvOS\\System\\Init through the
+            VFS and ELF loader, then requires PID 1 to signal from CPL3.
+
+  qemu-initrd-rejections:
+    name: QEMU / controlled initrd rejection (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: initrd-missing-test
+            description: Missing ramdisk metadata is rejected during boot.
+          - features: initrd-corrupt-test
+            description: Malformed CPIO is rejected without unsafe parsing.
+          - features: initrd-missing-init-test
+            description: "A valid Boot: volume without its boot init is rejected."
+          - features: initrd-invalid-init-test
+            description: "A malformed Boot: init executable is rejected by the ELF loader."
+          - features: initrd-wx-init-test
+            description: A writable executable boot init is rejected by W^X policy.
+          - features: initrd-missing-volume-test
+            description: "A valid initrd without a registered Boot: volume fails clearly."
+          - features: initrd-volume-registration-test
+            description: "Duplicate Boot: registration is rejected deterministically."
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: ${{ matrix.features }}
+          description: ${{ matrix.description }}
 
   qemu-page-fault:
     name: QEMU / expected page fault

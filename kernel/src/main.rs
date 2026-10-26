@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod arch;
 mod drivers;
+mod fs;
 mod graphics;
 mod halt;
 mod process;
@@ -53,6 +54,48 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 /// not just that a single interrupt happened to arrive.
 const TIMER_TEST_TICKS: u64 = 5;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // Failure variants are constructed only in selected QEMU scenario builds.
+enum BootFailure {
+    MissingRamdisk,
+    InvalidRamdiskMetadata,
+    CorruptArchive,
+    BootVolumeRegistration,
+    MissingBootVolume,
+    MissingInit,
+    InvalidInitElf,
+    UnexpectedSuccess,
+}
+
+fn fail_boot(failure: BootFailure) -> ! {
+    let expected = match failure {
+        BootFailure::MissingRamdisk => cfg!(feature = "initrd-missing-test"),
+        BootFailure::CorruptArchive => cfg!(feature = "initrd-corrupt-test"),
+        BootFailure::BootVolumeRegistration => {
+            cfg!(feature = "initrd-volume-registration-test")
+        }
+        BootFailure::MissingBootVolume => cfg!(feature = "initrd-missing-volume-test"),
+        BootFailure::MissingInit => cfg!(feature = "initrd-missing-init-test"),
+        BootFailure::InvalidInitElf => {
+            cfg!(any(
+                feature = "initrd-invalid-init-test",
+                feature = "initrd-wx-init-test"
+            ))
+        }
+        BootFailure::InvalidRamdiskMetadata | BootFailure::UnexpectedSuccess => false,
+    };
+    if expected {
+        kprintln!("[initrd-test] expected controlled boot rejection: {failure:?}");
+        #[cfg(feature = "qemu-test")]
+        arch::x86_64::qemu::exit_success();
+    }
+    kprintln!("[boot] fatal initial-volume failure: {failure:?}");
+    #[cfg(feature = "qemu-test")]
+    arch::x86_64::qemu::exit_failure();
+    #[cfg(not(feature = "qemu-test"))]
+    halt::halt_forever()
+}
+
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kprintln!();
     kprintln!("========================================");
@@ -79,6 +122,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // This is what lets `kernel_main` keep using the framebuffer afterward
     // without retaining any other access to `boot_info`.
     let mut framebuffer = boot_info.framebuffer.take();
+    let ramdisk_metadata = (boot_info.ramdisk_addr.into_option(), boot_info.ramdisk_len);
     let framebuffer_mapping = framebuffer.as_mut().map(|buffer| {
         let bytes = buffer.buffer_mut();
         (bytes.as_mut_ptr() as u64, bytes.len() as u64)
@@ -94,6 +138,105 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::memory::run_heap_smoke_tests();
     task::init();
     process::init();
+    kprintln!("[initrd] validating ramdisk metadata");
+    let ramdisk =
+        // SAFETY: the pinned bootloader mapping is retained and checked by
+        // memory::init's boot-mapping audit before this immutable view exists.
+        unsafe { fs::BootRamdisk::from_mapping(ramdisk_metadata.0, ramdisk_metadata.1) }
+            .unwrap_or_else(|error| {
+                let failure = if error == fs::RamdiskError::Missing {
+                    BootFailure::MissingRamdisk
+                } else {
+                    kprintln!("[initrd] invalid ramdisk metadata: {error:?}");
+                    BootFailure::InvalidRamdiskMetadata
+                };
+                fail_boot(failure)
+            });
+    kprintln!(
+        "[initrd] ramdisk detected ({} bytes)",
+        ramdisk.bytes().len()
+    );
+    kprintln!("[initrd] validating CPIO newc archive");
+    let archive = fs::initrd::Archive::validate(ramdisk.bytes()).unwrap_or_else(|error| {
+        kprintln!("[initrd] CPIO validation failed: {error:?}");
+        fail_boot(BootFailure::CorruptArchive)
+    });
+    kprintln!(
+        "[initrd] archive validated ({} entries)",
+        archive.entry_count()
+    );
+    #[cfg(not(feature = "initrd-missing-volume-test"))]
+    {
+        kprintln!("[vfs] registering initrd filesystem as Boot:");
+        fs::vfs::register_boot_volume(archive).unwrap_or_else(|error| {
+            kprintln!("[vfs] Boot: registration failed: {error:?}");
+            fail_boot(BootFailure::BootVolumeRegistration)
+        });
+        kprintln!("[vfs] boot volume ready");
+    }
+    #[cfg(feature = "initrd-volume-registration-test")]
+    match fs::vfs::register_boot_volume(archive) {
+        Err(fs::vfs::FsError::DuplicateVolume) => {
+            kprintln!("[vfs-test] duplicate Boot: registration rejected");
+        }
+        Err(error) => {
+            kprintln!("[vfs-test] unexpected Boot: registration error: {error:?}");
+            arch::x86_64::qemu::exit_failure();
+        }
+        Ok(()) => fail_boot(BootFailure::UnexpectedSuccess),
+    }
+    if let Err(error) = fs::vfs::run_boot_checks() {
+        kprintln!("[vfs] Boot: volume lookup failed: {error:?}");
+        let failure = if error == fs::vfs::FsError::VolumeNotFound {
+            BootFailure::MissingBootVolume
+        } else {
+            BootFailure::BootVolumeRegistration
+        };
+        fail_boot(failure);
+    }
+    #[cfg(any(
+        not(any(feature = "qemu-test", feature = "userspace-test")),
+        feature = "initrd-boot-test",
+        feature = "initrd-missing-init-test",
+        feature = "initrd-invalid-init-test",
+        feature = "initrd-wx-init-test"
+    ))]
+    {
+        const INIT_PATH: &str = "Boot:\\pvOS\\System\\Init";
+        kprintln!("[init] resolving {INIT_PATH}");
+        kprintln!("[init] loading boot init");
+        let init = match fs::vfs::spawn_path(None, INIT_PATH) {
+            Ok(init) => init,
+            Err(fs::vfs::SpawnPathError::Filesystem(fs::vfs::FsError::NotFound)) => {
+                fail_boot(BootFailure::MissingInit)
+            }
+            Err(fs::vfs::SpawnPathError::Filesystem(fs::vfs::FsError::VolumeNotFound)) => {
+                fail_boot(BootFailure::MissingBootVolume)
+            }
+            Err(fs::vfs::SpawnPathError::Process(process::SpawnElfError::Elf(_))) => {
+                fail_boot(BootFailure::InvalidInitElf)
+            }
+            Err(error) => {
+                kprintln!("[init] boot executable load rejected: {error:?}");
+                fail_boot(BootFailure::InvalidInitElf)
+            }
+        };
+        if cfg!(any(
+            feature = "initrd-missing-init-test",
+            feature = "initrd-invalid-init-test",
+            feature = "initrd-wx-init-test"
+        )) {
+            fail_boot(BootFailure::UnexpectedSuccess);
+        }
+        let snapshot = process::snapshot(init).expect("published PID 1 process has no snapshot");
+        assert_eq!(
+            snapshot.pid.get(),
+            1,
+            "first userspace process is not PID 1"
+        );
+        kprintln!("[process] init created with PID 1");
+        kprintln!("[init] boot init runnable");
+    }
     #[cfg(feature = "qemu-test")]
     arch::x86_64::memory::run_address_space_smoke_test();
     #[cfg(feature = "qemu-test")]
@@ -131,8 +274,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let scheduler_smoke_tasks = task::prepare_smoke_test();
     #[cfg(feature = "process-capacity-test")]
     task::run_process_capacity_test();
-    #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
-    task::prepare_release_userspace_smoke();
     #[cfg(feature = "process-preemption-test")]
     task::prepare_process_preemption_test();
     #[cfg(feature = "process-smoke-test")]
@@ -154,8 +295,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::run_smoke_test(scheduler_smoke_tasks.0, scheduler_smoke_tasks.1);
     #[cfg(feature = "user-fault-containment-test")]
     task::prepare_user_fault_containment_test();
-    #[cfg(not(any(feature = "qemu-test", feature = "userspace-test")))]
-    task::wait_for_release_userspace_smoke();
 
     #[cfg(feature = "process-preemption-test")]
     task::wait_for_process_preemption_test();

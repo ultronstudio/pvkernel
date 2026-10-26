@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes pvKernel's current architecture as implemented in
-version 0.0.9. It does not describe planned or aspirational architecture; see
+version 0.0.10. It does not describe planned or aspirational architecture; see
 [ROADMAP.md](ROADMAP.md) for that.
 
 ## Components
@@ -20,6 +20,7 @@ pvKernel kernel_main
     |   |-- syscall: experimental scalar int 0x80 ABI
     |-- task: bounded scheduler, kernel/user Task contexts, SwitchPlan
     |-- process: ProcessId/PID table, lifecycle, ELF64 loader, snapshots
+    |-- fs: immutable initrd, CPIO newc provider, bounded read-only VFS
 ```
 ## Responsibility boundary
 
@@ -47,8 +48,13 @@ process policy, and the PIT hot path does not allocate or parse executable data.
   `exit`. The checked static ELF64 loader accepts only validated `ET_EXEC`
   `PT_LOAD` images. CPL3 #PF/#GP/#UD terminate the affected process and retain
   scalar fault metadata. No stable ABI is promised before 0.1.0.
-* **Future work**: VFS/initrd, `/bin/init`, FDs, fork/general exec, dynamic
-  linking, user heap/mmap, signals, IPC, general frame reclamation, storage,
+* **Init path**: the boot image carries a separate read-only CPIO `newc`
+  archive. The kernel validates it, registers its provider as temporary
+  volume `Boot:`, resolves `Boot:\\pvOS\\System\\Init`, and passes its
+  archive-backed bytes to `process::spawn_elf`; PID 1 enters at CPL3 under
+  the existing ELF/W^X and address-space checks.
+* **Future work**: userspace FDs, general `exec`/`fork`, dynamic linking,
+  user heap/mmap, signals, IPC, general frame reclamation, disk storage,
   networking, SMP, and GUI remain out of scope.
 ## Initialization order
 
@@ -118,10 +124,12 @@ process policy, and the PIT hot path does not allocate or parse executable data.
 13. The process subsystem audits required boot mappings, initializes its
     bounded table, and can construct inactive process address spaces while
     preserving audited supervisor-only kernel mappings.
-14. Process-owned tasks use checked ELF loading, dedicated user and kernel
-    stacks, and timer-driven CPL3 preemption. On ordinary boots an embedded
-    static smoke ELF exercises CPL3 entry, `getpid`, and terminal `exit`;
-    QEMU features select deterministic process and legacy boundary scenarios.
+14. On ordinary boots the checked bootloader ramdisk view is parsed as CPIO
+    `newc`, adapted by `InitrdFs`, and registered as the temporary `Boot:`
+    volume. `Boot:\\pvOS\\System\\Init` is looked up as a regular file. The
+    existing static ELF64 loader constructs its address space, and the process
+    subsystem publishes it as parentless PID 1. QEMU features select
+    deterministic process and legacy boundary scenarios.
 15. The timer entry saves the complete interrupt context and can schedule
     both CPL0 kernel tasks and process-owned CPL3 tasks, switching CR3 and
     TSS.RSP0 according to the selected context.
@@ -209,11 +217,33 @@ selected user's supervisor RSP0 stack, and a Rust dispatcher for `getpid`
 and terminal `exit`. The separate legacy `arch::x86_64::userspace` module
 retains bootstrap CPL3 boundary-test payloads. Process-owned user Tasks use
 the normal checked ELF loader and synthetic scheduler context; ordinary
-boots run an embedded static smoke executable until VFS/initrd is available.
+boots load `Boot:\\pvOS\\System\\Init` from the read-only boot volume.
 See
 [docs/architecture/syscalls.md](docs/architecture/syscalls.md) and
 [docs/architecture/processes.md](docs/architecture/processes.md) for the
 current details.
+
+## Filesystem and init ownership (0.0.10)
+
+`fs::initrd` validates the full immutable CPIO `newc` archive and adapts it to
+the filesystem-provider interface. The VFS holds a bounded volume registry;
+0.0.10 registers only `Boot:` before interrupts are enabled. It has no lock
+or allocation on lookup paths. `spawn_path` resolves a regular file and
+delegates its archive-backed bytes to `process::spawn_elf`. The process
+subsystem alone reserves PID/ProcessId, builds the isolated address space and
+stack, validates ELF/W^X, prepares the task, and atomically publishes it.
+Volume names match ASCII case-insensitively. Path components retain their
+UTF-8 spelling unchanged; the generic VFS does not choose component matching
+semantics. The Boot:/CPIO provider uses exact case-sensitive matching, while
+future providers may define another documented policy. This boundary is
+intentional for filesystem interoperability; no Unicode folding or
+Windows/NTFS semantics are implemented.
+`Boot:\\pvOS\\System\\Init` confirms PID 1 with `getpid`, writes the
+deterministic `I` serial marker, and remains alive in a scalar-safe spin loop.
+Static ELF64 is only the bootstrap representation; a final executable format
+is future work. See
+[docs/architecture/initrd.md](docs/architecture/initrd.md) and
+[docs/architecture/vfs.md](docs/architecture/vfs.md).
 
 ## Fatal exception behavior
 

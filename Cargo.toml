@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kernel"]
+members = ["kernel", "kernel/fs-core", "userspace/init"]
 
 # Single authoritative version (and shared metadata) for every crate in the
 # workspace. `kernel/Cargo.toml` inherits `version.workspace = true` instead
@@ -9,7 +9,7 @@ members = ["kernel"]
 # docs/security/vulnerability-management.md and the release workflows for
 # why that consistency matters at release time.
 [workspace.package]
-version = "0.0.9"
+version = "0.0.10"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 repository = "https://github.com/ultronstudio/pvkernel"
@@ -70,13 +70,25 @@ elf-loader-test = ["kernel/elf-loader-test"]
 elf-malformed-test = ["kernel/elf-malformed-test"]
 task-stack-guard-fault-test = ["kernel/task-stack-guard-fault-test"]
 task-capacity-test = ["kernel/task-capacity-test"]
+initrd-boot-test = ["kernel/initrd-boot-test"]
+initrd-missing-test = ["kernel/initrd-missing-test"]
+initrd-corrupt-test = ["kernel/initrd-corrupt-test"]
+initrd-missing-init-test = ["kernel/initrd-missing-init-test"]
+initrd-invalid-init-test = ["kernel/initrd-invalid-init-test"]
+initrd-wx-init-test = ["kernel/initrd-wx-init-test"]
+initrd-missing-volume-test = ["kernel/initrd-missing-volume-test"]
+initrd-volume-registration-test = ["kernel/initrd-volume-registration-test"]
 
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+pvkernel-init = { path = "userspace/init", artifact = "bin", target = "x86_64-unknown-none" }
 bootloader = "=0.11.17"
 
 [profile.dev]
 panic = "abort"
+
+[profile.dev.package.pvkernel-init]
+debug = 0
 
 [profile.release]
 panic = "abort"

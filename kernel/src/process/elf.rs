@@ -630,10 +630,7 @@ fn test_elf() -> alloc::vec::Vec<u8> {
 /// Builds the embedded process-exit smoke ELF with its expected PID baked
 /// into the test code. This is a deterministic QEMU fixture, not a loader
 /// shortcut or a production executable provider.
-#[cfg(any(
-    not(any(feature = "qemu-test", feature = "userspace-test")),
-    feature = "process-smoke-test"
-))]
+#[cfg(feature = "process-smoke-test")]
 pub(crate) fn process_smoke_elf(expected_pid: u64) -> alloc::vec::Vec<u8> {
     const ENTRY: u64 = 0x0040_0000;
     const FILE_OFFSET: usize = 0x1000;
@@ -802,6 +799,7 @@ pub(crate) fn process_isolation_elf(expected: u64) -> alloc::vec::Vec<u8> {
     bytes
 }
 
+#[cfg(feature = "qemu-test")]
 fn test_load_header(
     bytes: &mut [u8],
     at: usize,
@@ -820,14 +818,17 @@ fn test_load_header(
     put_u64(bytes, at + 48, Size4KiB::SIZE);
 }
 
+#[cfg(feature = "qemu-test")]
 fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
     bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "qemu-test")]
 fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "qemu-test")]
 fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
     bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
