@@ -89,8 +89,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
         run: rustup show
-      - name: Install Python test dependency
-        run: python3 -m pip install PyYAML
+      - name: Ensure PyYAML is available
+        run: |
+          python3 -c 'import yaml' 2>/dev/null \
+            || sudo apt-get install -y --no-install-recommends python3-yaml
       - name: Test filesystem primitives on the host
         run: cargo test -p pvkernel-fs-core --locked
       - name: Test release and policy tooling
