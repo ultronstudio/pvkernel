@@ -13,6 +13,13 @@
 
 ### Changed
 
+* Release correctness gates now include all 34 deterministic QEMU scenarios,
+  host filesystem tests, and release-tooling tests, with a coverage guard
+  against omitted Cargo scenarios.
+* CI and both release pipelines boot production release-profile UEFI images;
+  packaging verifies the exact image to be published before hashing and
+  attestation. Stable releases also require a dated changelog entry.
+
 * Ordinary boot resolves the boot init through `Boot:`; it no longer launches
   the kernel-generated userspace smoke ELF.
 * User-process ELF construction and publication is centralized in

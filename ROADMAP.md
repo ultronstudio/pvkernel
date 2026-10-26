@@ -131,6 +131,12 @@ remain future work.
 * bootloader-delivered CPIO `newc` initrd registered as the temporary `Boot:` volume
 * `Boot:\\pvOS\\System\\Init` loaded through the existing static ELF64 policy as PID 1
 * deterministic parser/path/provider/volume/QEMU validation
+* release validation covers all 34 deterministic QEMU scenarios and host
+  filesystem tests, plus boot verification of the packaged production image
+
+Release preparation: validate the corrected gates in RC3 before the stable
+0.0.10 release. Persistent storage and additional userspace APIs remain
+outside this milestone.
 
 ## 0.1.0 — First pvOS-Ready Kernel Foundation
 

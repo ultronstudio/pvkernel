@@ -81,6 +81,45 @@ jobs:
       - name: Clippy (pvkernel-runner, host target)
         run: cargo clippy -p pvkernel-runner --locked -- -D warnings
 
+  host-tests:
+    name: Host filesystem and release tooling tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Install Python test dependency
+        run: python3 -m pip install PyYAML
+      - name: Test filesystem primitives on the host
+        run: cargo test -p pvkernel-fs-core --locked
+      - name: Test release and policy tooling
+        run: python3 -I -m unittest discover -s scripts/tests -v
+      - name: Validate deterministic scenario coverage
+        run: python3 -I scripts/check_qemu_coverage.py
+
+  release-boot:
+    name: QEMU / release image boot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Build production release image
+        id: image
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --no-deps --locked > "$RUNNER_TEMP/metadata.json"
+          package_id=$(python3 scripts/cargo_release_out_dir.py package-id "$RUNNER_TEMP/metadata.json")
+          cargo build --release --locked --message-format=json-render-diagnostics | tee "$RUNNER_TEMP/build.jsonl"
+          out_dir=$(python3 scripts/cargo_release_out_dir.py out-dir "$package_id" "$RUNNER_TEMP/build.jsonl")
+          echo "path=$out_dir/pvkernel-uefi.img" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/release-boot-smoke
+        with:
+          image: ${{ steps.image.outputs.path }}
+
   build:
     name: Build (${{ matrix.features }})
     runs-on: ubuntu-latest
@@ -110,6 +149,18 @@ jobs:
           - scheduler-preemption-test
           - task-stack-guard-fault-test
           - task-capacity-test
+          - process-preemption-test
+          - process-smoke-test
+          - process-exit-test
+          - process-id-reuse-test
+          - user-copy-test
+          - user-fault-containment-test
+          - address-space-isolation-test
+          - process-capacity-test
+          - user-stack-guard-fault-test
+          - user-kernel-isolation-test
+          - elf-loader-test
+          - elf-malformed-test
           - initrd-boot-test
           - initrd-missing-test
           - initrd-corrupt-test
@@ -374,3 +425,30 @@ jobs:
           description: >-
             Fills the fixed task table, checks deterministic exhaustion,
             reuses an exited slot with a new generation, and rejects the old ID.
+
+  qemu-process:
+    name: QEMU / process regression (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - process-preemption-test
+          - process-smoke-test
+          - process-exit-test
+          - process-id-reuse-test
+          - user-copy-test
+          - user-fault-containment-test
+          - address-space-isolation-test
+          - process-capacity-test
+          - user-stack-guard-fault-test
+          - user-kernel-isolation-test
+          - elf-loader-test
+          - elf-malformed-test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/qemu-scenario
+        with:
+          features: ${{ matrix.features }}
+          description: Process, address-space, user-copy, fault, and ELF regression coverage.
