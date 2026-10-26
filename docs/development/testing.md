@@ -150,7 +150,39 @@ documented in [docs/architecture/kernel-tasks.md](../architecture/kernel-tasks.m
 
 ## CI integration
 
-`.github/workflows/ci.yml`'s `qemu-tests` job installs `qemu-system-x86` and
-runs the timer, fault, memory, and userspace tests described above on every
-pull request and push to `main`, in addition to the `check` job's
-formatting and build verification.
+`.github/workflows/ci.yml` reports formatting, Clippy, host filesystem/tooling
+checks, feature builds, and each deterministic QEMU scenario separately.
+The 34-scenario runtime matrix includes all process, ELF, address-space,
+user-copy and fault-containment regressions as well as the initrd scenarios.
+`scripts/check_qemu_coverage.py` fails if a standalone Cargo test feature is
+missing from that runtime matrix, preventing silently incomplete green runs.
+
+Host filesystem tests run with `cargo test -p pvkernel-fs-core --locked`;
+this selects the architecture-neutral crate without combining the bare-metal
+kernel and host runner test roots. Python tooling tests run with
+`python3 -I -m unittest discover -s scripts/tests -v`.
+
+### Production release image boot
+
+The additional `QEMU / release image boot` job builds with
+`cargo build --release --locked` and no test features. Cargo's JSON output
+identifies the image location. `scripts/boot_release_image.py` boots that
+image directly with QEMU and OVMF; it does not build a replacement image or
+require the production kernel to include `isa-debug-exit` test code.
+
+The script requires ordered serial evidence of archive validation, the
+`Boot:` volume, numeric PID 1, CPL3 entry and Init's `0x49` syscall marker.
+It observes QEMU for another two seconds and rejects early exit, known fatal
+or test-only diagnostics, or timeout. It uses snapshot disk writes and
+checks that the supplied image's SHA-256 remains unchanged. This is a boot
+smoke check, not proof of long-term process health or hardware compatibility.
+
+Both RC and stable artifact packaging repeat this check on the **exact UEFI
+image in the publication directory**, before hashing, upload and attestation.
+Run it locally with QEMU and an installed OVMF firmware pair:
+
+```bash
+python3 -I scripts/boot_release_image.py PATH/TO/pvkernel-uefi.img \
+  --ovmf-code /usr/share/OVMF/OVMF_CODE_4M.fd \
+  --ovmf-vars /usr/share/OVMF/OVMF_VARS_4M.fd
+```

@@ -78,6 +78,12 @@ Workflow lint (actionlint)
 Security policy files
 ```
 
+The 0.0.10 correctness gate additionally reports `Host filesystem and release
+tooling tests`, `QEMU / release image boot`, and all 12
+`QEMU / process regression (<feature>)` matrix checks. Register these as
+required after they first report. The process feature names are listed in
+`.github/workflows/ci.yml`'s `qemu-process` matrix; every one must pass.
+
 `Security policy files` is reported by `.github/workflows/security-triage.yml`,
 which deliberately has no `paths:` filter so it runs on every pull request
 (see [security-triage.md](security-triage.md#policy-file-validation)).
