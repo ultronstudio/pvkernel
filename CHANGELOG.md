@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.10] - Unreleased
+## [0.0.10] - 2026-11-22
 
 ### Added
 
@@ -19,6 +19,8 @@
   `process::spawn_elf`, and UEFI image construction includes the initrd.
 * Static ELF64 remains the internal bootstrap executable representation; no
   final pvOS executable/application format is defined.
+* Updated the transitive `rustix` dependency to 1.1.6 to address
+  RUSTSEC-2026-0486.
 
 ### Known limitations
 
