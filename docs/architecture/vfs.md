@@ -88,9 +88,12 @@ its bytes to `process::spawn_elf`; only the process subsystem handles ELF,
 address spaces, guarded stacks, rollback, and atomic process/task publication.
 Init remains parentless numeric PID 1 and enters at CPL3.
 
-The VFS is read-only. It has no file descriptors, filesystem syscalls,
-permissions, symlinks, disk devices, partition discovery, or persistent
-volumes. It does not claim Windows compatibility.
+The VFS and syscall descriptors are read-only. ABI v1 exposes bounded
+`open/read/close` calls for regular files, with eight descriptors per process
+and checked user-memory copies. Descriptors are not inherited and are closed
+when their process exits. The VFS has no write permissions, symlinks, disk
+devices, partition discovery, or persistent volumes. It does not claim
+Windows compatibility.
 
 ## Future interoperability direction
 

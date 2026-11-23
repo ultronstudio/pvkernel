@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* ABI v1 syscalls for checked read-only VFS file access, serial console output,
+  child process spawn, non-blocking wait, exit-status delivery, and reap.
+* `pvkernel-user`, a minimal `no_std` Rust library wrapping the userspace ABI.
+* PID 1 integration coverage for reading the init image, spawning a child,
+  receiving its status, and reclaiming its open descriptors on exit.
+
+### Changed
+
+* Kernel task/kernel-entry stacks are now 64 KiB to support the bounded
+  synchronous ELF-load path invoked by userspace spawn.
+
 ## [0.0.10] - 2026-11-22
 
 ### Added

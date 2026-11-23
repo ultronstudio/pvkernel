@@ -314,12 +314,12 @@ created in this milestone is supervisor-only and is created either by the
 boot-time smoke test or the optional post-unmap fault test - there is no
 general-purpose "map memory for a subsystem" caller yet.
 
-> Starting in 0.0.6, `arch::x86_64::userspace` (test-only, behind Cargo
-> features) does execute ring-3 code and a minimal, provisional `int 0x80`
-> syscall ABI - see [docs/architecture/userspace-entry.md](userspace-entry.md)
-> and [docs/architecture/syscalls.md](syscalls.md). There is still no ELF
-> loader, no process model, and no general-purpose "map memory for a
-> subsystem" caller.
+> Starting in 0.0.6, the test harness exercised ring-3 entry and a bootstrap
+> `int 0x80` ABI. The current kernel has process-owned ring-3 tasks and the
+> pvOS ABI v1 syscall surface; see
+> [docs/architecture/userspace-entry.md](userspace-entry.md) and
+> [docs/architecture/syscalls.md](syscalls.md). There is still no general-
+> purpose "map memory for a subsystem" caller.
 
 ## Boot-time tests
 
@@ -378,10 +378,10 @@ allocation are fatal and do not attempt unsafe rollback.
 ## Kernel task stacks (pvKernel 0.0.8)
 
 The scheduler reserves eight fixed stack slots beginning at
-`0xffff900020000000`. Each slot occupies 24 KiB of virtual address space:
-one lower unmapped guard page, four mapped pages (16 KiB stack), and one
+`0xffff900020000000`. Each slot occupies 72 KiB of virtual address space:
+one lower unmapped guard page, sixteen mapped pages (64 KiB stack), and one
 upper unmapped guard page. The full region ends at
-`0xffff900020030000`. Initialization checks the entire range for existing
+`0xffff900020090000`. Initialization checks the entire range for existing
 mappings before mapping any stack and validates canonicality and checked
 arithmetic.
 

@@ -1,23 +1,17 @@
-//! Provisional bootstrap syscall numbers (the value placed in `RAX` before
-//! `int 0x80`).
+//! pvOS ABI v1 syscall numbers (the value placed in `RAX` before `int 0x80`).
 //!
-//! This is pvKernel's own **provisional** ABI: it is not POSIX, not Linux,
-//! and not the eventual stable pvOS syscall ABI. It exists only so 0.0.6 has
-//! *something* concrete to test the CPL3-to-CPL0 transition, the RSP0
-//! ring-transition stack, and register preservation against. Expect the
-//! encoding, numbering, and argument conventions here to be replaced once a
-//! real per-process syscall entry mechanism exists. See
+//! This is pvKernel's own ABI, not POSIX or Linux. Existing numbers and
+//! meanings are preserved from the 0.1.0 compatibility checkpoint onward;
+//! additions use unused numbers. See
 //! [docs/architecture/syscalls.md](../../../../../../docs/architecture/syscalls.md).
 
-/// The provisional bootstrap ABI version returned by [`ABI_VERSION_QUERY`].
+/// The pvOS userspace ABI version returned by [`ABI_VERSION_QUERY`].
 ///
-/// Identifies the shape of *this* `int 0x80` bootstrap ABI (register
-/// convention, error encoding, this syscall number set) - not a pvOS or
-/// POSIX ABI version. Bump this if the bootstrap ABI's shape ever changes
-/// in an incompatible way before it is replaced entirely.
+/// Identifies the register convention, error encoding, and syscall behavior.
+/// Additive syscall numbers preserve v1; incompatible changes require a bump.
 pub const ABI_VERSION: u64 = 1;
 
-/// Queries the provisional ABI version.
+/// Queries the userspace ABI version.
 ///
 /// Arguments: none. Returns: [`ABI_VERSION`] in `RAX`.
 pub const ABI_VERSION_QUERY: u64 = 0;
@@ -27,9 +21,8 @@ pub const ABI_VERSION_QUERY: u64 = 0;
 /// Arguments: `RDI` bits `7:0` are the byte to write; bits `63:8` are
 /// ignored. Returns: `0` in `RAX`.
 ///
-/// This intentionally takes the byte **by value**, not by pointer: 0.0.6
-/// has no `copy_from_user` and no policy for validating a user-supplied
-/// pointer, so no syscall in this milestone ever dereferences one. See
+/// This retained diagnostic syscall intentionally takes its byte by value.
+/// Buffer output is provided by [`CONSOLE_WRITE`]. See
 /// docs/architecture/syscalls.md.
 pub const DEBUG_WRITE_BYTE: u64 = 1;
 
@@ -45,6 +38,29 @@ pub const GETPID: u64 = 3;
 /// Terminates the current process with `RDI as i32`. This syscall never
 /// returns to its caller; process exit is completed after a timer handoff.
 pub const EXIT: u64 = 4;
+
+/// Opens a read-only regular file by a UTF-8, volume-qualified path.
+/// Arguments: `RDI` user pointer, `RSI` byte length. Returns a descriptor >= 3.
+pub const OPEN: u64 = 5;
+
+/// Reads from a descriptor. Arguments: `RDI` descriptor, `RSI` output pointer,
+/// `RDX` maximum byte count. Returns bytes copied, or zero at end of file.
+pub const READ: u64 = 6;
+
+/// Closes a descriptor owned by the current process. Argument: `RDI` descriptor.
+pub const CLOSE: u64 = 7;
+
+/// Writes a bounded byte buffer to the serial console.
+/// Arguments: `RDI` user pointer, `RSI` byte length. Returns bytes written.
+pub const CONSOLE_WRITE: u64 = 8;
+
+/// Loads a read-only ELF file from VFS as a child of the current process.
+/// Arguments: `RDI` path pointer, `RSI` path length. Returns child PID.
+pub const SPAWN: u64 = 9;
+
+/// Non-blocking direct-child wait. Arguments: `RDI` child PID, `RSI` status
+/// output pointer. Returns 0 while running, 1 after writing status and reaping.
+pub const WAIT_CHILD: u64 = 10;
 
 /// Start of the test-only syscall namespace.
 ///

@@ -152,10 +152,11 @@ supervisor RW/NX, supervisor RO/NX, user RW/NX and user RO/X. USER must be
 clear through every parent as well as the leaf. No current mapping sets
 GLOBAL. Mapping operations use 4 KiB pages; they reject parent huge pages.
 
-The provisional `int 0x80` gate is DPL3. Its assembly entry saves all 15
-GPRs on RSP0, calls the scalar dispatcher, writes its return to saved RAX,
-restores registers and `iretq`s. As an interrupt gate, it clears IF; PIT
-cannot preempt a syscall body. Keep this non-preemptible syscall policy.
+The ABI v1 `int 0x80` gate is DPL3. Its assembly entry saves all 15 GPRs on
+the task's 64 KiB supervisor RSP0 stack, calls the dispatcher, writes its
+return to saved RAX, restores registers and `iretq`s. Buffer calls use the
+checked user-copy layer. As an interrupt gate, it clears IF; PIT cannot
+preempt a syscall body. Keep this non-preemptible syscall policy.
 
 The 0.0.9 context frame does not save x87, MMX, SSE, or AVX state. Before
 userspace runs, the kernel therefore sets CR0.EM, clears CR4.OSXSAVE and
@@ -181,7 +182,7 @@ as constants from current source.
 | BootInfo + memory-region slice | Current QEMU `0xffff828000000000..0xffff828000000bb0` (PML4 261) | The allocator retains the memory-region slice; both ranges are audited |
 | Scratch | `0xffff_9000_0000_0000` | Test-only; checked unmapped before use |
 | Kernel heap | `0xffff_9000_1000_0000..0xffff_9000_1010_0000` | 1 MiB supervisor RW/NX; guard pages at `...0ffff000` and `...10100000` |
-| Kernel task stacks | `0xffff_9000_2000_0000..0xffff_9000_2003_0000` | 8 x 16 KiB RW/NX supervisor stacks; one unmapped page on each side; 24 KiB stride |
+| Kernel task stacks | `0xffff_9000_2000_0000..0xffff_9000_2009_0000` | 8 x 64 KiB RW/NX supervisor stacks; one unmapped page on each side; 72 KiB stride |
 | User test code | `0x0000_6000_0000_0000` | One test-only RX+USER page in the current root |
 | User test guard | `0x0000_6000_0000_1000` | One deliberately unmapped page between code and stack |
 | User test stack | `0x0000_6000_0000_2000..0x0000_6000_0000_3000` | One test-only RW/NX+USER page in the current root |
@@ -498,16 +499,21 @@ handoff.
 
 ## 21. Syscall policy and initial surface
 
-Keep provisional `int 0x80`, with no SYSCALL/SYSRET migration. Interrupt-gate
-entry clears IF, so the maskable PIT cannot preempt ordinary syscall Rust
-code. `getpid()` returns the PID only when the current scheduler Task is a
-Running user Task; bootstrap CPL3 tests get `InvalidContext`. `exit(status)`
-marks the Process and Task Exiting, releases locks, then uses the explicit
-STI;HLT handoff. The next PIT saves the outgoing frame and switches away;
-Zombie is published only on a later interrupt after the old kernel stack is
-inactive. The embedded smoke ELF verifies getpid and that exit does not
-return. Process creation stays an internal kernel/test operation. Do not add
-fork, exec/spawn, open/read/write, mmap, brk, signals or filesystem calls.
+The ABI v1 entry remains `int 0x80`; there is no SYSCALL/SYSRET migration.
+Interrupt-gate entry clears IF, so the maskable PIT cannot preempt ordinary
+syscall Rust code. `getpid()` returns the PID only when the current scheduler
+Task is a Running user Task; non-process CPL3 tests get `InvalidContext`.
+`exit(status)` marks the Process and Task Exiting, releases locks, then uses
+the explicit STI;HLT handoff. The next PIT saves the outgoing frame and
+switches away; Zombie is published on a later interrupt after the old kernel
+stack is inactive.
+
+ABI v1 currently provides ABI query, debug byte, timer ticks, PID, exit,
+read-only VFS open/read/close, bounded serial console output, ELF child
+spawn, and non-blocking direct-child wait/reap. Pointer arguments always pass
+through checked user-copy. The boot init exercises this surface. The design
+still excludes blocking waits, stdin, writable files, mmap, brk, signals,
+and a final pvOS executable format.
 
 ## 22. User-copy design
 
@@ -634,9 +640,9 @@ working set. Percentage calculation belongs in userspace.
 
 ## 28. Capacity review
 
-Current eight task stacks use 128 KiB mapped physical stack backing and
-192 KiB virtual span (eight 24 KiB slots, each 16 KiB stack plus two guards).
-Increasing to 16 would add 128 KiB backing and 192 KiB virtual span. Table
+Current eight task stacks use 512 KiB mapped physical stack backing and
+576 KiB virtual span (eight 72 KiB slots, each 64 KiB stack plus two guards).
+Increasing to 16 would add 512 KiB backing and 576 KiB virtual span. Table
 metadata is small. Retain 8 shared scheduler slots and add at most 8 process
 slots initially; process and kernel tasks compete for the same slots. The
 bootstrap context is outside the table. Test mixed capacity. Any future
@@ -659,10 +665,11 @@ Keep lifecycle generic, scheduler policy separate, and CR3/TSS/privilege
 mechanics architecture-specific. Exact files should follow existing module
 ownership, not be mechanically created.
 
-Consider a tiny future no_std `pvkernel-abi` with ABI version, syscall
-numbers, scalar types and error codes only. No Process, AddressSpace, TCB,
-kernel pointer or page-table internals. 0.0.9 ABI is experimental; first
-meaningful compatibility checkpoint is 0.1.0. No crate created now.
+The `pvkernel-user` no_std crate provides the ABI v1 Rust wrappers and error
+types without exposing Process, AddressSpace, TCB, kernel pointers or
+page-table internals. The compatibility guarantee begins with pvKernel
+0.1.0; additions use unused syscall numbers, and incompatible changes require
+a new ABI version.
 
 ## 30. QEMU validation plan
 
@@ -685,8 +692,8 @@ continued kernel activity are observed.
 | `elf-malformed-test` | Bad magic, ELF32, endian, machine/type, PT_INTERP, filesz>memsz, offset/address overflow, out-of-range/overlap, W+X, invalid/non-executable/noncanonical entry | deterministic loader error, no panic/partial process |
 | `user-copy-test` | Valid same/cross-page read/write; null, low, kernel, noncanonical, overflow, second page missing, supervisor page, read-only output | valid pass; invalid returns controlled error without crash |
 
-Before VFS/initrd, release smoke uses embedded static ELF bytes. Replace its
-provider with initrd/VFS in 0.0.10. No filesystem support is implied.
+The initrd QEMU boot scenario validates PID 1's read-only file syscalls,
+console output, child spawn, exit status, reap, and descriptor cleanup.
 
 ## 31. Security threat review
 
@@ -713,8 +720,8 @@ mandatory; do not schedule userspace if they cannot prove shared mappings.
 
 ## 32. Explicit non-goals
 
-No userspace file descriptors or general filesystem syscalls, fork, general
-exec/spawn syscall, dynamic linker, shared libraries, PT_INTERP, PIE/ASLR
+No writable file descriptors, stdin/keyboard input, fork, replacing the
+current image, dynamic linker, shared libraries, PT_INTERP, PIE/ASLR
 unless reconsidered, userspace multithreading API, signals, pipes, PTY, shared memory, general
 IPC, user heap, brk, mmap, demand paging, COW, swap, general frame reclamation,
 block/storage stack, networking, users/groups/security database, capability
@@ -727,8 +734,8 @@ manager, GUI/desktop, APIC/x2APIC, SMP, NUMA or multicore scheduling.
 | multithreaded process | ProcessId/address space independent of per-thread TaskId and kernel stack |
 | System Monitor | stable snapshot, PID, ticks and mapped-page count |
 | Service Manager / PID 1 | generation-safe parent links can be reassigned for orphans |
-| wait/reap syscall | Zombie retains result until internal reap |
-| VFS/FDs 0.0.10 | resource domain is process-owned, scheduler stays unaware |
+| blocking wait | current wait is non-blocking and preserves the single-core scheduler contract |
+| disk-backed VFS | process descriptors remain independent of provider format |
 | resource handles/capabilities | opaque IDs and narrow ABI keep pointers/internals out of userspace |
 | shared memory/IPC | mapping ownership can later represent shared references |
 | frame reclamation | ownership metadata exists although allocator remains monotonic |

@@ -10,7 +10,10 @@ use crate::{
 };
 
 pub const MAX_KERNEL_TASKS: usize = 8;
-pub const STACK_SIZE: u64 = 16 * 1024;
+// User syscalls can synchronously resolve VFS paths and validate/load an ELF
+// while running on this RSP0 stack. 16 KiB was insufficient for that bounded
+// call chain; keep enough headroom for page-table and loader frames as well.
+pub const STACK_SIZE: u64 = 64 * 1024;
 const PAGE_SIZE: u64 = 4096;
 const GUARD_PAGES: u64 = 2;
 const SLOT_PAGES: u64 = STACK_SIZE / PAGE_SIZE + GUARD_PAGES;
