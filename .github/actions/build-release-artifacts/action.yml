@@ -126,6 +126,13 @@ runs:
         echo "uefi=$dir/pvkernel-${suffix}-uefi.img" >> "$GITHUB_OUTPUT"
         echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
 
+    # Boot the exact production image copied into the publication directory.
+    # No test features or rebuilt substitute are used by this smoke check.
+    - name: Boot packaged release image
+      uses: ./.github/actions/release-boot-smoke
+      with:
+        image: ${{ steps.locate.outputs.dir }}/pvkernel-${{ steps.locate.outputs.suffix }}-uefi.img
+
     - name: Generate checksums
       shell: bash
       # Computed last, after every other artifact (including the SBOM) is

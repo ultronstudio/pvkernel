@@ -1,0 +1,22 @@
+name: Boot production release image
+description: Boot the supplied, unchanged UEFI image and require the real PID 1 CPL3 marker.
+inputs:
+  image:
+    description: Path to the production UEFI disk image (built without test features).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install QEMU and OVMF
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+    - name: Verify production image boots to PID 1
+      shell: bash
+      env:
+        RELEASE_IMAGE: ${{ inputs.image }}
+      run: |
+        python3 -I scripts/boot_release_image.py "$RELEASE_IMAGE" \
+          --ovmf-code /usr/share/OVMF/OVMF_CODE_4M.fd \
+          --ovmf-vars /usr/share/OVMF/OVMF_VARS_4M.fd

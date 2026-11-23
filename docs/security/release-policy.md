@@ -38,7 +38,14 @@ Requirements, enforced by the workflow itself:
   passes;
 * the full security gate (`security.yml`, reused via `workflow_call`)
   passes;
-* every deterministic QEMU test passes (as part of the CI gate above).
+* every deterministic QEMU test passes (as part of the CI gate above),
+  including all 34 current scenarios; the host gate checks feature coverage
+  so adding a standalone test feature without a QEMU job fails CI;
+* architecture-neutral filesystem tests and Python release-tooling tests pass;
+* the production release-profile UEFI image boots to the real PID 1 CPL3
+  marker. Artifact packaging repeats this smoke check on the exact image
+  being published, before checksums and attestation (see
+  [testing.md](../development/testing.md#production-release-image-boot)).
 
 Produces a GitHub **Pre-release**, explicitly marked as such, with:
 
@@ -70,6 +77,8 @@ Example: `v0.0.7`, cut by `.github/workflows/release.yml`
 Requirements, enforced by the workflow itself, on top of everything an RC
 requires:
 
+* `CHANGELOG.md` has an exact dated `## [X.Y.Z] - YYYY-MM-DD` entry;
+  an `Unreleased` entry is accepted for an RC but rejected for a stable release;
 * the operator explicitly confirms the exact commit SHA being released,
   and the workflow verifies it matches the ref actually checked out
   (catches "dispatched against the wrong branch" operator error);
@@ -129,3 +138,22 @@ Security release notes clearly state:
 Detailed exploit instructions are not published prematurely during
 coordinated disclosure, consistent with
 [SECURITY.md](../../SECURITY.md)'s coordinated-disclosure section.
+
+## Preparing pvKernel 0.0.10 after RC2
+
+The RC2 source audit recorded 34 local QEMU passes, but its GitHub release
+run executed only 22 scenarios. The release-validation correction restores
+all 12 process/ELF/isolation scenarios to the build and runtime matrices,
+adds host filesystem tests, enforces coverage, and boots production images.
+The historical audit remains an account of the original reviewed tree.
+
+After these changes merge, cut RC3 against the exact updated `main` SHA and
+review its full correctness/security gates and packaged-image boot log.
+Keep 0.0.10 marked Unreleased until preparing the final stable release;
+then add its actual release date and update the roadmap status in a final
+documentation change. Stable publishing revalidates that final exact commit.
+
+Before dispatching the stable workflow, verify Settings -> Environments ->
+`release` has at least one required reviewer. The workflow's `environment`
+key alone does not enforce this configuration. No repository-settings
+verification is implied by a successful RC build or this source change.
