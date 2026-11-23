@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::panic::PanicInfo;
+use pvkernel_user::{Error, File};
 
 core::arch::global_asm!(
     ".global _start",
@@ -13,36 +14,93 @@ core::arch::global_asm!(
     init_main = sym init_main,
 );
 
+const ABI_VERSION: u64 = 1;
+const INIT_PATH: &str = "Boot:\\pvOS\\System\\Init";
+
 fn init_main() -> ! {
-    let pid = syscall(3, 0);
+    if pvkernel_user::abi_version() != Ok(ABI_VERSION) {
+        fail();
+    }
+    let pid = pvkernel_user::process_id().unwrap_or_else(|_| fail());
     if pid != 1 {
-        let _ = syscall(1, u64::from(b'!'));
-        let _ = syscall(4, 1);
-        loop {
-            core::hint::spin_loop();
+        // PID 1 starts this image once as a child to exercise process
+        // publication, exit handoff, wait status transfer, and reap.
+        let _file = File::open(INIT_PATH).unwrap_or_else(|_| fail());
+        pvkernel_user::exit(0);
+    }
+
+    let mut image = File::open(INIT_PATH).unwrap_or_else(|_| fail());
+    let mut magic = [0; 4];
+    let read = image.read(&mut magic).unwrap_or_else(|_| fail());
+    if read != magic.len() || magic != *b"\x7fELF" {
+        fail();
+    }
+    image.close().unwrap_or_else(|_| fail());
+
+    if !matches!(File::open("Boot:\\missing"), Err(Error::NotFound))
+        || !matches!(File::open("Boot:\\pvOS"), Err(Error::InvalidOperation))
+    {
+        fail();
+    }
+    let files = [
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+        File::open(INIT_PATH).unwrap_or_else(|_| fail()),
+    ];
+    if !matches!(File::open(INIT_PATH), Err(Error::NoResources)) {
+        fail();
+    }
+    for file in files {
+        file.close().unwrap_or_else(|_| fail());
+    }
+
+    let child = pvkernel_user::spawn(INIT_PATH).unwrap_or_else(|_| fail());
+    if child.get() <= 1 {
+        fail();
+    }
+    let mut status = i32::MIN;
+    loop {
+        match pvkernel_user::wait_child(child, &mut status) {
+            Ok(false) => core::hint::spin_loop(),
+            Ok(true) if status == 0 => break,
+            _ => fail(),
         }
     }
-    // Deterministic serial-visible success marker consumed by QEMU scenarios.
-    let _ = syscall(1, u64::from(b'I'));
+
+    // The child intentionally exited with one descriptor open. Its exit
+    // handoff must release all descriptors before PID 1 reuses the table.
+    let file = File::open(INIT_PATH).unwrap_or_else(|_| fail());
+    file.close().unwrap_or_else(|_| fail());
+
+    write_console(b"pvOS: Boot VFS, child spawn, wait and reap OK\r\n");
+    pvkernel_user::debug_write_byte(b'I').unwrap_or_else(|_| fail());
     loop {
         core::hint::spin_loop();
     }
 }
 
-fn syscall(number: u64, argument: u64) -> u64 {
-    let result: u64;
-    // SAFETY: this uses pvKernel's scalar-only int 0x80 bootstrap ABI. The
-    // kernel saves/restores user GPR state and accepts only scalar arguments.
-    unsafe {
-        core::arch::asm!("int 0x80", inlateout("rax") number => result, in("rdi") argument,
-            lateout("rcx") _, lateout("r11") _, options(nostack));
+fn write_console(bytes: &[u8]) {
+    if pvkernel_user::console_write(bytes).ok() != Some(bytes.len()) {
+        fail();
     }
-    result
+}
+
+fn fail() -> ! {
+    let _ = pvkernel_user::console_write(b"pvOS: init failed\r\n");
+    if pvkernel_user::process_id().is_ok() {
+        pvkernel_user::exit(1);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    fail()
 }

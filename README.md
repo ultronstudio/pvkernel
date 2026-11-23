@@ -46,7 +46,13 @@ Implemented:
   fallback, and per-user-task supervisor kernel-entry stacks
 * validated synthetic CPL3 context entry via `iretq`, including both legacy
   boundary tests and process-owned userspace Tasks
-* a minimal, provisional, scalar-only `int 0x80` syscall ABI
+* the initial pvOS ABI v1 over `int 0x80`, with checked user-memory copying
+* a `no_std` Rust userspace library for files, console output, child spawn,
+  wait/reap, PID query, and process exit
+* bounded per-process read-only file descriptors backed by the VFS
+* serial console writes from userspace, with checked user buffers
+* static ELF child creation from VFS and non-blocking direct-child wait with
+  exit-status transfer and automatic descriptor cleanup on exit
 * `USER_DATA`/`USER_CODE` page permissions, reusing the existing W^X
   mapping API
 * four deterministic, headless QEMU tests for the syscall boundary,
@@ -61,7 +67,7 @@ Implemented:
 * deterministic heap success, OOM, and guard-page QEMU tests
 * bounded single-core preemptive round-robin scheduling for ring-0 kernel
   tasks, with generation-aware IDs and deterministic task lifecycle
-* eight centrally reserved 16 KiB kernel task stacks, supervisor-only RW/NX,
+* eight centrally reserved 64 KiB kernel task stacks, supervisor-only RW/NX,
   with unmapped guard pages above and below
 * dedicated timer IRQ context switching with complete general-purpose
   register and interrupt-frame preservation; process-owned CPL3 frames are
@@ -85,8 +91,8 @@ Volume names match without ASCII case (`Boot:`, `boot:`, and `BOOT:` identify
 the same volume). Path components remain UTF-8 and case-preserving; the VFS
 does not change component case or impose one matching policy on every
 filesystem. The Boot:/CPIO provider uses exact case-sensitive matching.
-* provisional `getpid`/`exit`, checked user-copy APIs, and process-level
-  #PF/#GP/#UD containment
+* `getpid`/`exit`, checked user-copy APIs, and process-level #PF/#GP/#UD
+  containment
 * deterministic QEMU process, isolation, capacity, ELF, user-copy, and fault
   containment scenarios
 * structured serial diagnostics
@@ -102,12 +108,10 @@ Not implemented:
 * dynamic heap growth, per-process heaps, or a slab allocator
 * dynamic task stack growth, task join, blocking, sleep, or priorities
 * APIC, SMP, and multicore scheduling
-* userspace file descriptors or general `open`/`read`/`write` syscalls
-* persistent `C:` system volume, disk drivers, pvFS, NTFS, exFAT, FAT32, or
-  other disk filesystems
-* writable filesystems, block devices, persistent storage, or shell
-* fork, general exec/spawn syscall, dynamic linking, shared libraries, PIE, or
-  relocations
+* stdin/keyboard input, writable filesystems, block devices, persistent
+  storage, or disk filesystem drivers
+* fork, replacing the current process image, dynamic linking, shared
+  libraries, PIE, or relocations
 * PVX executable format, PVAPP application bundles, PVPKG packages, or package
   management
 * userspace thread API, signals, pipes, PTY, shared memory, or general IPC
@@ -117,9 +121,9 @@ Not implemented:
   capabilities, or GUI/desktop
 * device drivers beyond serial, framebuffer, PIC, and PIT
 
-pvKernel's process and syscall interfaces are experimental. It does not
-claim production readiness, general hardware support, a stable userspace ABI,
-or readiness as a general-purpose kernel.
+The ABI v1 compatibility guarantee begins with pvKernel 0.1.0; earlier
+versions remain experimental. pvKernel does not claim production readiness,
+general hardware support, or readiness as a general-purpose kernel.
 
 ## Build
 

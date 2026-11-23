@@ -459,6 +459,9 @@ version = "0.0.10"
 [[package]]
 name = "pvkernel-init"
 version = "0.0.10"
+dependencies = [
+ "pvkernel-user",
+]
 
 [[package]]
 name = "pvkernel-runner"
@@ -469,6 +472,10 @@ dependencies = [
  "ovmf-prebuilt",
  "pvkernel-init",
 ]
+
+[[package]]
+name = "pvkernel-user"
+version = "0.0.10"
 
 [[package]]
 name = "quote"

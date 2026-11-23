@@ -1,9 +1,12 @@
 //! Bounded, generation-safe process identity and lifecycle state.
 //!
 //! Architecture-specific address-space and task resources are attached in
-//! later layers; this module owns only process policy and bounded metadata.
+//! This module owns process policy, bounded metadata, checked user-copy, and
+//! process-owned read-only VFS descriptors. Architecture-specific mapping and
+//! task-switching details remain in their respective modules.
 
 pub mod elf;
+pub mod files;
 pub mod user_copy;
 
 use spin::{Mutex, Once};
@@ -103,6 +106,7 @@ pub enum ProcessError {
     InvalidId,
     InvalidTransition,
     InvalidName,
+    NotChild,
 }
 
 #[cfg(any(
@@ -483,6 +487,43 @@ impl ProcessTable {
         Ok(slot.snapshot(id))
     }
 
+    fn try_wait_child(
+        &self,
+        parent: ProcessId,
+        child_pid: u64,
+    ) -> Result<Option<(ProcessId, i32)>, ProcessError> {
+        if self.slot_for(parent)?.state != ProcessState::Alive {
+            return Err(ProcessError::InvalidTransition);
+        }
+        let Some((index, child)) = self.slots.iter().enumerate().find(|(_, slot)| {
+            slot.parent == Some(parent) && slot.pid.is_some_and(|pid| pid.get() == child_pid)
+        }) else {
+            return Err(ProcessError::NotChild);
+        };
+        if child.state != ProcessState::Zombie {
+            return Ok(None);
+        }
+        let status = match child.exit_reason.ok_or(ProcessError::InvalidTransition)? {
+            ProcessExitReason::Exited { status } => status,
+            ProcessExitReason::Fault { vector, .. } => -128 - i32::from(vector),
+        };
+        Ok(Some((
+            ProcessId {
+                slot: index as u8,
+                generation: child.generation,
+            },
+            status,
+        )))
+    }
+
+    fn reap_child(&mut self, parent: ProcessId, child: ProcessId) -> Result<(), ProcessError> {
+        let slot = self.slot_for(child)?;
+        if slot.parent != Some(parent) {
+            return Err(ProcessError::NotChild);
+        }
+        self.reap(child)
+    }
+
     fn add_cpu_tick(&mut self, id: ProcessId) -> Result<(), ProcessError> {
         let slot = self.slot_for_mut(id)?;
         if !matches!(slot.state, ProcessState::Alive | ProcessState::Exiting) {
@@ -624,7 +665,9 @@ pub fn begin_exit(id: ProcessId, reason: ProcessExitReason, tick: u64) -> Result
 }
 
 pub fn mark_zombie(id: ProcessId) -> Result<(), ProcessError> {
-    with_table(|table| table.transition(id, ProcessState::Exiting, ProcessState::Zombie))
+    with_table(|table| table.transition(id, ProcessState::Exiting, ProcessState::Zombie))?;
+    files::close_all(id);
+    Ok(())
 }
 
 #[allow(dead_code)] // Kept as the internal Zombie reaper API until a wait/reaper service consumes it.
@@ -637,6 +680,24 @@ pub fn snapshot(id: ProcessId) -> Result<ProcessSnapshot, ProcessError> {
         .get()
         .expect("process subsystem used before init");
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().snapshot(id))
+}
+
+/// Returns a completed direct child's status without reaping it. `None`
+/// means the child still has work to finish; callers can retry after a timer
+/// tick while implementing a non-blocking wait loop.
+pub fn try_wait_child(
+    parent: ProcessId,
+    child_pid: u64,
+) -> Result<Option<(ProcessId, i32)>, ProcessError> {
+    let table = PROCESS_TABLE.get().ok_or(ProcessError::InvalidId)?;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        table.lock().try_wait_child(parent, child_pid)
+    })
+}
+
+/// Reaps a Zombie after its exit status has been copied to the parent.
+pub fn reap_child(parent: ProcessId, child: ProcessId) -> Result<(), ProcessError> {
+    with_table(|table| table.reap_child(parent, child))
 }
 
 /// Returns a bounded point-in-time view of every non-vacant, non-retired
@@ -694,7 +755,6 @@ pub(crate) fn address_space_handle(id: ProcessId) -> Result<AddressSpaceHandle, 
     x86_64::instructions::interrupts::without_interrupts(|| table.lock().address_space_handle(id))
 }
 
-#[allow(dead_code)] // 0.0.9 has no buffer-bearing syscall; future handlers must use this checked path.
 pub(crate) fn copy_from_user(
     id: ProcessId,
     address: u64,
@@ -721,7 +781,6 @@ pub(crate) fn copy_from_user(
     })
 }
 
-#[allow(dead_code)] // 0.0.9 has no buffer-bearing syscall; future handlers must use this checked path.
 pub(crate) fn copy_to_user(
     id: ProcessId,
     address: u64,
@@ -845,7 +904,26 @@ fn run_model_self_tests() {
         .unwrap();
     let child = parent_table.reserve(Some(parent), name, 1).unwrap();
     assert_eq!(parent_table.snapshot(child).unwrap().parent, Some(parent));
-    parent_table.abort_creation(child).unwrap();
+    assert_eq!(parent_table.try_wait_child(parent, 2), Ok(None));
+    assert_eq!(
+        parent_table.try_wait_child(parent, 3),
+        Err(ProcessError::NotChild)
+    );
+    parent_table
+        .transition(child, ProcessState::Creating, ProcessState::Alive)
+        .unwrap();
+    parent_table
+        .begin_exit(child, ProcessExitReason::Exited { status: 23 }, 2)
+        .unwrap();
+    parent_table
+        .transition(child, ProcessState::Exiting, ProcessState::Zombie)
+        .unwrap();
+    assert_eq!(
+        parent_table.try_wait_child(parent, 2),
+        Ok(Some((child, 23)))
+    );
+    parent_table.reap_child(parent, child).unwrap();
+    assert_eq!(parent_table.snapshot(child), Err(ProcessError::InvalidId));
     parent_table
         .begin_exit(parent, ProcessExitReason::Exited { status: 0 }, 2)
         .unwrap();

@@ -125,7 +125,7 @@ remain future work.
 * no stable userspace ABI is implied; first meaningful compatibility
   checkpoint remains 0.1.0
 
-## 0.0.10 — VFS and Initial Ramdisk (implemented; unreleased)
+## 0.0.10 — VFS and Initial Ramdisk (released)
 
 * bounded volume-qualified path parsing and an eight-entry volume registry
 * bootloader-delivered CPIO `newc` initrd registered as the temporary `Boot:` volume
@@ -136,6 +136,22 @@ remain future work.
 
 A kernel foundation capable of supporting early pvOS userspace development.
 This milestone is not a production-ready or general-purpose release.
+
+The first userspace slice is now implemented in the working tree:
+
+* stable ABI v1 calls for ABI query, process identity/exit, file open/read/
+  close, bounded console output, child spawn, and non-blocking child wait/reap
+* process-owned descriptors with eight read-only files per process and cleanup
+  when a process exits
+* a `no_std` `pvkernel-user` crate with safe Rust wrappers for the ABI
+* PID 1 integration that exercises VFS reads, descriptor limits and cleanup,
+  spawn/exit/status/reap, and console output from ring 3
+* a headless QEMU boot-chain check that requires PID 1 to complete that path
+
+The remaining 0.1.0 work is to harden the bootable user environment and make
+the ABI usable by independently built applications. Blocking wait/input,
+writable files, persistent storage, a general executable format, and a
+user-facing shell are not included in this milestone slice.
 
 Persistent storage, block and partition discovery, filesystem drivers (pvFS,
 NTFS, exFAT, FAT32), and the native pvOS executable/application model remain

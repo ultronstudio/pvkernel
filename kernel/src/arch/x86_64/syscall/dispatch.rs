@@ -12,6 +12,9 @@ use super::frame::SyscallFrame;
 use super::numbers;
 use crate::kprintln;
 
+const MAX_USER_PATH: usize = pvkernel_fs_core::path::MAX_PATH_LEN;
+const MAX_USER_IO: usize = 512;
+
 /// Dispatches one `int 0x80` syscall and returns its `RAX`-encoded result.
 ///
 /// # Safety
@@ -44,7 +47,7 @@ pub(super) extern "C" fn pvkernel_syscall_dispatch(frame: *const SyscallFrame) -
     }
 
     if frame.caller_privilege_level() != PrivilegeLevel::Ring3 {
-        // Nothing in pvKernel 0.0.6 legitimately invokes `int 0x80` from
+        // No supported userspace ABI call invokes `int 0x80` from
         // CPL0; this is a kernel bug, not an ordinary user-triggerable
         // error. It is still reported through the normal error-return path
         // (rather than panicking) so that a stray kernel-mode `int 0x80`
@@ -58,8 +61,7 @@ pub(super) extern "C" fn pvkernel_syscall_dispatch(frame: *const SyscallFrame) -
     }
 
     // Every argument register is treated as an opaque integer until a
-    // specific syscall validates it; no bootstrap syscall in 0.0.6
-    // dereferences one as a pointer.
+    // specific syscall validates it. Pointer-taking calls use user_copy.
     let number = frame.rax;
     let arg0 = frame.rdi;
 
@@ -71,10 +73,183 @@ pub(super) extern "C" fn pvkernel_syscall_dispatch(frame: *const SyscallFrame) -
             crate::task::current_user_pid().unwrap_or_else(|| SyscallError::InvalidContext.encode())
         }
         numbers::EXIT => crate::task::exit_current_user(frame.rdi as u32 as i32),
+        numbers::OPEN => open_file(frame.rdi, frame.rsi),
+        numbers::READ => read_file(frame.rdi, frame.rsi, frame.rdx),
+        numbers::CLOSE => close_file(frame.rdi),
+        numbers::CONSOLE_WRITE => console_write(frame.rdi, frame.rsi),
+        numbers::SPAWN => execute_path(frame.rdi, frame.rsi),
+        numbers::WAIT_CHILD => wait_child(frame.rdi, frame.rsi),
         #[cfg(feature = "userspace-test")]
         n if n >= numbers::TEST_NAMESPACE_BASE => super::test::dispatch(n, frame),
         _ => SyscallError::Unsupported.encode(),
     }
+}
+
+fn current_process() -> Result<crate::process::ProcessId, u64> {
+    crate::task::current_user_process_id().ok_or(SyscallError::InvalidContext.encode())
+}
+
+fn copy_user_path<'a>(
+    address: u64,
+    length: u64,
+    bytes: &'a mut [u8; MAX_USER_PATH],
+) -> Result<&'a str, u64> {
+    let length = usize::try_from(length).map_err(|_| SyscallError::InvalidArgument.encode())?;
+    if length == 0 || length > bytes.len() {
+        return Err(SyscallError::InvalidArgument.encode());
+    }
+    crate::process::user_copy::copy_from_user(address, &mut bytes[..length])
+        .map_err(|_| SyscallError::UserMemory.encode())?;
+    let path = core::str::from_utf8(&bytes[..length])
+        .map_err(|_| SyscallError::InvalidArgument.encode())?;
+    Ok(path)
+}
+
+fn map_fs_error(error: crate::fs::vfs::FsError) -> u64 {
+    use crate::fs::vfs::FsError;
+    match error {
+        FsError::NotFound | FsError::VolumeNotFound => SyscallError::NotFound.encode(),
+        FsError::IsDirectory => SyscallError::InvalidOperation.encode(),
+        FsError::InvalidPath | FsError::InvalidVolumeName | FsError::InvalidOffset => {
+            SyscallError::InvalidArgument.encode()
+        }
+        _ => SyscallError::IoFailure.encode(),
+    }
+}
+
+fn map_file_error(error: crate::process::files::FileError) -> u64 {
+    use crate::process::files::FileError;
+    match error {
+        FileError::BadDescriptor => SyscallError::BadDescriptor.encode(),
+        FileError::IsDirectory => SyscallError::InvalidOperation.encode(),
+        FileError::TableFull => SyscallError::NoResources.encode(),
+        FileError::Filesystem(error) => map_fs_error(error),
+    }
+}
+
+fn open_file(address: u64, length: u64) -> u64 {
+    let owner = match current_process() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let mut bytes = [0; MAX_USER_PATH];
+    let path = match copy_user_path(address, length, &mut bytes) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    crate::process::files::open(owner, path).unwrap_or_else(map_file_error)
+}
+
+fn read_file(descriptor: u64, address: u64, length: u64) -> u64 {
+    let owner = match current_process() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let length = match usize::try_from(length) {
+        Ok(length) if length <= MAX_USER_IO => length,
+        _ => return SyscallError::InvalidArgument.encode(),
+    };
+    let (node, offset) = match crate::process::files::read_plan(owner, descriptor) {
+        Ok(plan) => plan,
+        Err(error) => return map_file_error(error),
+    };
+    let mut bytes = [0; MAX_USER_IO];
+    let count = match node.read(offset, &mut bytes[..length]) {
+        Ok(count) => count,
+        Err(error) => return map_fs_error(error),
+    };
+    if count != 0 && crate::process::user_copy::copy_to_user(address, &bytes[..count]).is_err() {
+        return SyscallError::UserMemory.encode();
+    }
+    if let Err(error) = crate::process::files::commit_read(owner, descriptor, offset, count) {
+        return map_file_error(error);
+    }
+    count as u64
+}
+
+fn close_file(descriptor: u64) -> u64 {
+    let owner = match current_process() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    crate::process::files::close(owner, descriptor).map_or_else(map_file_error, |_| 0)
+}
+
+fn console_write(address: u64, length: u64) -> u64 {
+    if let Err(error) = current_process() {
+        return error;
+    }
+    let length = match usize::try_from(length) {
+        Ok(length) if length <= MAX_USER_IO => length,
+        _ => return SyscallError::InvalidArgument.encode(),
+    };
+    if length == 0 {
+        return 0;
+    }
+    let mut bytes = [0; MAX_USER_IO];
+    if crate::process::user_copy::copy_from_user(address, &mut bytes[..length]).is_err() {
+        return SyscallError::UserMemory.encode();
+    }
+    crate::drivers::serial::write_bytes(&bytes[..length]) as u64
+}
+
+fn execute_path(address: u64, length: u64) -> u64 {
+    let parent = match current_process() {
+        Ok(parent) => parent,
+        Err(error) => return error,
+    };
+    let mut bytes = [0; MAX_USER_PATH];
+    let path = match copy_user_path(address, length, &mut bytes) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    #[cfg(any(
+        not(any(feature = "qemu-test", feature = "userspace-test")),
+        feature = "initrd-boot-test"
+    ))]
+    {
+        match crate::fs::vfs::spawn_path(Some(parent), path) {
+            Ok(id) => crate::process::pid(id)
+                .map(|pid| pid.get())
+                .unwrap_or_else(|_| SyscallError::InvalidContext.encode()),
+            Err(crate::fs::vfs::SpawnPathError::Filesystem(error)) => map_fs_error(error),
+            Err(crate::fs::vfs::SpawnPathError::NotRegular) => {
+                SyscallError::InvalidOperation.encode()
+            }
+            Err(crate::fs::vfs::SpawnPathError::InvalidName) => {
+                SyscallError::InvalidArgument.encode()
+            }
+            Err(crate::fs::vfs::SpawnPathError::Process(_)) => SyscallError::NoResources.encode(),
+        }
+    }
+    #[cfg(not(any(
+        not(any(feature = "qemu-test", feature = "userspace-test")),
+        feature = "initrd-boot-test"
+    )))]
+    {
+        let _ = (parent, path);
+        SyscallError::Unsupported.encode()
+    }
+}
+
+fn wait_child(child_pid: u64, status_address: u64) -> u64 {
+    let parent = match current_process() {
+        Ok(parent) => parent,
+        Err(error) => return error,
+    };
+    let (child, status) = match crate::process::try_wait_child(parent, child_pid) {
+        Ok(Some(child)) => child,
+        Ok(None) => return 0,
+        Err(crate::process::ProcessError::NotChild) => return SyscallError::NotChild.encode(),
+        Err(_) => return SyscallError::InvalidOperation.encode(),
+    };
+    if crate::process::user_copy::copy_to_user(status_address, &status.to_le_bytes()).is_err() {
+        return SyscallError::UserMemory.encode();
+    }
+    if crate::process::reap_child(parent, child).is_err() {
+        return SyscallError::InvalidOperation.encode();
+    }
+    1
 }
 
 /// Implements [`numbers::DEBUG_WRITE_BYTE`].

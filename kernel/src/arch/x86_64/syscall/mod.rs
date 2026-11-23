@@ -1,10 +1,7 @@
-//! Provisional bootstrap `int 0x80` syscall ABI.
+//! pvOS ABI v1 over the `int 0x80` syscall gate.
 //!
-//! pvKernel 0.0.6 adds a **provisional, scalar-only** syscall ABI reachable
-//! only via the software interrupt `int 0x80`: `SYSCALL`/`SYSRET` are not
-//! implemented, there is no per-process or per-thread syscall entry
-//! mechanism, and no syscall in this milestone accepts or dereferences a
-//! user pointer. See
+//! `SYSCALL`/`SYSRET` are not implemented. Pointer-taking calls use the
+//! checked process-aware user-copy layer. See
 //! [docs/architecture/syscalls.md](../../../../../docs/architecture/syscalls.md)
 //! for the full ABI description and rationale.
 //!

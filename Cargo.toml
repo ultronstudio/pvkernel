@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "kernel/fs-core", "userspace/init"]
+members = ["kernel", "kernel/fs-core", "userspace/init", "userspace/userlib"]
 
 # Single authoritative version (and shared metadata) for every crate in the
 # workspace. `kernel/Cargo.toml` inherits `version.workspace = true` instead

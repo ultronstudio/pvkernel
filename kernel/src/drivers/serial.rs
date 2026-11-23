@@ -31,6 +31,17 @@ pub fn _print(args: fmt::Arguments) {
     }
 }
 
+/// Writes raw bytes to COM1 for the process console syscall.
+pub(crate) fn write_bytes(bytes: &[u8]) -> usize {
+    let Some(mut guard) = serial().try_lock() else {
+        return 0;
+    };
+    for byte in bytes {
+        guard.send(*byte);
+    }
+    bytes.len()
+}
+
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => {

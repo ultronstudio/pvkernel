@@ -209,16 +209,15 @@ the heap for the kernel lifetime and are not reclaimed by `Box`, `Vec`, or
 [docs/architecture/virtual-memory.md](docs/architecture/virtual-memory.md)
 for the layout and safety invariants.
 
-## Syscall and userspace entry ownership (0.0.9)
+## Syscall and userspace entry ownership
 
-`arch::x86_64::syscall` owns the experimental scalar `int 0x80` ABI: a
-naked-asm entry stub at vector `0x80`, the `SyscallFrame` saved on the
-selected user's supervisor RSP0 stack, and a Rust dispatcher for `getpid`
-and terminal `exit`. The separate legacy `arch::x86_64::userspace` module
-retains bootstrap CPL3 boundary-test payloads. Process-owned user Tasks use
-the normal checked ELF loader and synthetic scheduler context; ordinary
-boots load `Boot:\\pvOS\\System\\Init` from the read-only boot volume.
-See
+`arch::x86_64::syscall` owns ABI v1 over `int 0x80`: a naked-asm entry stub
+at vector `0x80`, the `SyscallFrame` saved on the selected user's supervisor
+RSP0 stack, and a Rust dispatcher for checked file access, console output,
+child spawn, non-blocking wait/reap, PID, and exit calls. The Rust wrappers
+are in the `pvkernel-user` no_std crate. Process-owned user Tasks use the
+checked ELF loader and synthetic scheduler context; ordinary boots load
+`Boot:\\pvOS\\System\\Init` from the read-only boot volume. See
 [docs/architecture/syscalls.md](docs/architecture/syscalls.md) and
 [docs/architecture/processes.md](docs/architecture/processes.md) for the
 current details.
@@ -229,7 +228,9 @@ current details.
 the filesystem-provider interface. The VFS holds a bounded volume registry;
 0.0.10 registers only `Boot:` before interrupts are enabled. It has no lock
 or allocation on lookup paths. `spawn_path` resolves a regular file and
-delegates its archive-backed bytes to `process::spawn_elf`. The process
+delegates its archive-backed bytes to `process::spawn_elf`. ABI v1 adds
+read-only process descriptors over this provider and uses the same spawn
+path for children. The process
 subsystem alone reserves PID/ProcessId, builds the isolated address space and
 stack, validates ELF/W^X, prepares the task, and atomically publishes it.
 Volume names match ASCII case-insensitively. Path components retain their
@@ -238,10 +239,11 @@ semantics. The Boot:/CPIO provider uses exact case-sensitive matching, while
 future providers may define another documented policy. This boundary is
 intentional for filesystem interoperability; no Unicode folding or
 Windows/NTFS semantics are implemented.
-`Boot:\\pvOS\\System\\Init` confirms PID 1 with `getpid`, writes the
-deterministic `I` serial marker, and remains alive in a scalar-safe spin loop.
-Static ELF64 is only the bootstrap representation; a final executable format
-is future work. See
+`Boot:\\pvOS\\System\\Init` confirms PID 1, reads its own ELF header through
+the VFS ABI, exercises the bounded descriptor limit, spawns and waits for a
+child, verifies descriptor cleanup, and writes the deterministic `I` test
+marker. Static ELF64 is only the bootstrap representation; a final executable
+format is future work. See
 [docs/architecture/initrd.md](docs/architecture/initrd.md) and
 [docs/architecture/vfs.md](docs/architecture/vfs.md).
 

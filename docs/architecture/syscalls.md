@@ -1,127 +1,103 @@
-# Provisional bootstrap syscall ABI
+# pvOS userspace syscall ABI v1
 
-This document describes pvKernel's provisional, scalar-only `int 0x80`
-syscall ABI, implemented in
-[kernel/src/arch/x86_64/syscall/](../../kernel/src/arch/x86_64/syscall/). See
-[docs/architecture/userspace-entry.md](userspace-entry.md) for how CPL3 code
-capable of issuing this instruction gets there in the first place.
+This document specifies the initial Rust userspace ABI implemented by
+pvKernel's `int 0x80` gate. The supported Rust wrappers are in
+[`userspace/userlib`](../../userspace/userlib/). The first compatibility
+checkpoint is pvKernel 0.1.0; ABI v1 will keep existing syscall numbers,
+argument meanings, return encoding, and process behavior compatible from that
+release onward. Additive syscall numbers do not change the ABI version.
+Incompatible changes require a new ABI version.
 
-## Status: provisional and experimental in 0.0.9
+This is a pvOS ABI. It does not claim POSIX or Linux compatibility.
 
-This ABI is **not stable** and not borrowed from `errno.h`/POSIX/Linux
-numbering. It began as the 0.0.6 bootstrap boundary and is now extended with
-the first process-aware calls in 0.0.9. It remains experimental; the first
-meaningful compatibility checkpoint is 0.1.0 (see [ROADMAP.md](../../ROADMAP.md)).
+## Entry and registers
 
-## Entry mechanism: `int 0x80` only
+The only entry mechanism is software interrupt `int 0x80`; `SYSCALL`/`SYSRET`
+are not implemented.
 
-`SYSCALL`/`SYSRET` are **not implemented**. The only way to invoke a
-syscall is the software interrupt `int 0x80`. `arch::x86_64::interrupts::init`
-installs `syscall::pvkernel_syscall_entry_stub` at IDT vector `0x80`, using
-the raw `set_handler_addr` API (rather than `set_handler_fn`) because the
-stub is a naked-asm function that builds its own `iretq`-based return
-sequence instead of following the `x86-interrupt` calling convention. The
-gate's descriptor privilege level is explicitly set to `Ring3`
-(`set_privilege_level`), since the default gate DPL only permits invocation
-from CPL0 — without this, a CPL3 `int 0x80` would itself raise `#GP`.
+* `RAX`: syscall number on entry; result on return.
+* `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9`: up to six arguments in that order.
+* Other general-purpose registers are preserved by the entry stub.
 
-## Register convention
+The IDT gate is callable from ring 3. The processor switches to the current
+task's supervisor-only kernel-entry stack before the stub calls Rust. Kernel
+entry stacks are 64 KiB with unmapped guards; this accommodates synchronous
+process creation and ELF validation on the syscall path.
 
-* `RAX` — the syscall number on entry; the result on return.
-* `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9` — up to six scalar arguments, in
-  that order. (`R10` takes the traditional fourth-argument slot instead of
-  `RCX`, matching the Linux `x86-64` convention, since `RCX` is clobbered by
-  `SYSCALL` on hardware that supports it — kept for forward compatibility
-  even though this milestone does not implement `SYSCALL`.)
-* Every other general-purpose register (`RBX`, `RBP`, `R12`-`R15`, plus
-  `RCX`/`R11` beyond their argument roles) is preserved across the call:
-  the entry stub saves and restores all 15 GPRs around the dispatch.
+## Return and errors
 
-No syscall in this milestone accepts or dereferences a user pointer —
-every argument is treated as an opaque scalar integer. Central
-`copy_from_user`/`copy_to_user` primitives exist for future pointer-taking
-syscalls, but current `getpid` and `exit` calls do not use them.
+Results use `RAX`:
 
-## Result encoding
+* bit 63 clear: success; the lower bits contain the result.
+* bit 63 set: error; the remaining bits are an `Error` number.
 
-A syscall's result is encoded entirely in `RAX`:
+| Number | Error | Meaning |
+| ---: | --- | --- |
+| 1 | `Unsupported` | Unknown syscall number. |
+| 2 | `InvalidArgument` | Invalid length, path encoding, or argument. |
+| 3 | `PermissionDenied` | Reserved for a denied operation. |
+| 4 | `InvalidContext` | No process-owned userspace task is current. |
+| 5 | `BadDescriptor` | Descriptor is closed or belongs to another process. |
+| 6 | `NotFound` | Path or volume does not exist. |
+| 7 | `InvalidOperation` | Directory used as a file or invalid process state. |
+| 8 | `NoResources` | Bounded kernel table or process capacity is full. |
+| 9 | `UserMemory` | User range is unmapped, inaccessible, or overflows. |
+| 10 | `NotChild` | PID is not a direct child of the caller. |
+| 11 | `IoFailure` | Filesystem provider failed. |
 
-* bit 63 clear → success; the remaining 63 bits are the return value;
-* bit 63 set (`ERROR_BIT`) → failure; the remaining bits are a
-  [`SyscallError`](../../kernel/src/arch/x86_64/syscall/error.rs) variant:
-  * `Unsupported` (1) — the syscall number is not recognized;
-  * `InvalidArgument` (2) — reserved; no current syscall validates an
-    argument strictly enough to return this;
-  * `PermissionDenied` (3) — reserved; no current syscall is restricted
-    beyond "callable from CPL3 at all";
-  * `InvalidContext` (4) — the gate was entered from CPL0, which is always
-    a kernel bug rather than a user-triggerable error (see below).
+## Syscalls
 
-## Documented syscall numbers
+All numbers below are compiled into the kernel. Pointers refer to the current
+process and are copied only through the checked `copy_from_user` or
+`copy_to_user` path. The maximum path length is 255 bytes; paths are
+volume-qualified UTF-8 strings with an explicit byte length. Read and console
+write calls are capped at 512 bytes per call.
 
-Always compiled in (`syscall::numbers`):
+| Number | Name | Arguments | Success result |
+| ---: | --- | --- | --- |
+| 0 | `ABI_VERSION_QUERY` | — | ABI version (`1`). |
+| 1 | `DEBUG_WRITE_BYTE` | `RDI`: byte value | `0`; diagnostic output, retained for tests and boot diagnostics. |
+| 2 | `TIMER_TICKS` | — | PIT tick counter. |
+| 3 | `GETPID` | — | Current process PID. |
+| 4 | `EXIT` | `RDI`: signed 32-bit status | Never returns; ends the current process. |
+| 5 | `OPEN` | `RDI`: path pointer, `RSI`: path byte length | Read-only descriptor, numbered from `3`. |
+| 6 | `READ` | `RDI`: descriptor, `RSI`: output pointer, `RDX`: maximum bytes | Bytes copied; `0` at EOF. |
+| 7 | `CLOSE` | `RDI`: descriptor | `0`. |
+| 8 | `CONSOLE_WRITE` | `RDI`: byte pointer, `RSI`: byte length | Bytes written to the serial console. |
+| 9 | `SPAWN` | `RDI`: path pointer, `RSI`: path byte length | PID of the new direct child. |
+| 10 | `WAIT_CHILD` | `RDI`: child PID, `RSI`: writable `i32` status pointer | `0` while running; `1` after writing status and reaping. |
 
-| Number | Name | Behavior |
-| --- | --- | --- |
-| 0 | `ABI_VERSION_QUERY` | Returns the current bootstrap ABI version (`1`). |
-| 1 | `DEBUG_WRITE_BYTE` | Logs the byte in `RDI` to serial output; returns `0`. |
-| 2 | `TIMER_TICKS` | Returns the current PIT tick counter (`pit::ticks()`). |
-| 3 | `GETPID` | Returns the current process PID; returns `InvalidContext` when no process-owned user Task is current. |
-| 4 | `EXIT` | Terminates the current process with `RDI as i32`; never returns to userspace. |
+`OPEN` accepts regular files only. Directories return `InvalidOperation`.
+`Boot:` currently provides immutable initrd files, so descriptors are
+read-only and are not inherited by children. Each process can hold up to eight
+descriptors. Process exit closes all remaining descriptors.
 
-Additionally, under the `userspace-test` Cargo feature, a small test-only
-namespace (`>= TEST_NAMESPACE_BASE`, `0x1000`) exists solely for the
-deterministic tests — `TEST_STATUS` (returns a bitset, currently just
-"has a PIT tick been observed while at CPL3") and `TEST_EXIT` (diverges:
-exits QEMU under `qemu-test`, or halts/panics otherwise, based on whether
-`RDI` is zero). These are never part of the documented, stable ABI.
+`SPAWN` loads a static x86_64 ELF64 `ET_EXEC` from the VFS using the kernel's
+checked loader, creates a child process, and returns its PID. It does not
+replace the caller's image. `WAIT_CHILD` is non-blocking: callers retry while
+it returns `0`. A completed child is reaped only after its status has been
+copied successfully into the caller's writable memory. Exit statuses are
+preserved; a faulted child is reported as `-128 - exception_vector`.
 
-## The entry stub and `SyscallFrame`
+`EXIT` records the status and hands off from the exiting task. A timer switch
+publishes the process as a Zombie from another task's stack. The parent can
+then observe the status and reap the child. No scheduler or process-table lock
+is held while VFS lookup, ELF validation, user copying, or console output runs.
 
-`syscall::entry::pvkernel_syscall_entry_stub` is a `#[unsafe(naked)]`
-function containing hand-written `naked_asm!`. On `int 0x80`, the CPU has
-already switched to the TSS.RSP0 stack (see
-[docs/architecture/userspace-entry.md](userspace-entry.md)) and pushed a
-5-qword hardware frame (`RIP`, `CS`, `RFLAGS`, `RSP`, `SS` — no error code,
-since `int 0x80` is a software interrupt). The stub then:
+## Rust userspace library
 
-1. pushes all 15 general-purpose registers, in a fixed order, producing
-   exactly the `SyscallFrame` layout (`#[repr(C)]`, with compile-time
-   `offset_of!` assertions covering every field);
-2. passes a pointer to that frame (`mov rdi, rsp`) to
-   `syscall::dispatch::pvkernel_syscall_dispatch`, an ordinary `extern "C"`
-   Rust function;
-3. overwrites the saved `RAX` slot with the dispatcher's `u64` result;
-4. pops all 15 registers back (undoing step 1, restoring every register
-   except `RAX`, which now holds the result);
-5. executes `iretq` to return to CPL3.
+`pvkernel-user` is a `no_std` crate with wrappers for ABI version query, PID,
+read-only `File`, console output, child spawn, non-blocking wait, and exit.
+Wrappers reject over-limit buffers before issuing the syscall. Raw pointer
+construction remains the responsibility of safe Rust references passed to
+the library; the kernel independently validates every address.
 
-The combined push/call/pop sequence keeps `RSP` 16-byte aligned at the
-`call` instruction (a 40-byte hardware frame + 120 bytes of GPR pushes =
-160 bytes, a multiple of 16), satisfying the System V ABI the Rust
-dispatcher expects — independently guaranteed twice over, since the CPU
-itself also aligns `RSP` to 16 bytes before pushing on any
-privilege-level-changing interrupt.
+## Deliberate limits
 
-## Dispatch and the CPL0-origin check
+ABI v1 does not provide `SYSCALL`/`SYSRET`, blocking waits, stdin or keyboard
+input, writable files, disk storage, mmap, a user heap, signals, IPC, threads,
+or dynamic linking. Static ELF64 is the current bootstrap process image
+format, not the final pvOS application format.
 
-`syscall::dispatch::pvkernel_syscall_dispatch` first checks
-`frame.caller_privilege_level()` (derived from the saved `CS`'s RPL bits).
-A CPL0 origin is treated as a kernel bug, logged loudly, and reported through
-the normal error-return path (`SyscallError::InvalidContext`) rather than
-panicking. For CPL3, `GETPID` checks that the scheduler has a current
-process-owned user Task. `EXIT` validates that same context, records Process
-and Task as Exiting, releases locks while IF is clear, then deliberately
-executes an STI;HLT terminal handoff so PIT can switch away. It never writes a
-result or returns to the saved user RIP. Zombie publication is deferred until
-a later timer entry runs on another stack. Other calls match the documented
-numbers above (and, under `userspace-test`, the test-only namespace), falling
-back to `SyscallError::Unsupported`.
-
-## What this ABI does not provide
-
-* No `SYSCALL`/`SYSRET`.
-* No user-pointer arguments yet; central user-copy primitives exist, but no current syscall accepts a pointer.
-* No stable ABI guarantee; the 0.0.9 process-aware extension remains experimental.
-* No signal delivery, no blocking syscalls, no I/O beyond the debug
-  byte-logging syscall.
+The deterministic `userspace-test` syscall namespace (`>= 0x1000`) is
+test-only and is not part of ABI v1.

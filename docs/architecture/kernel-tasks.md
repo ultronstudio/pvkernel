@@ -91,8 +91,9 @@ not queued. Invalid queue/state relationships are kernel-fatal invariants.
 ## Task stacks and ownership
 
 The reserved virtual region begins at `0xffff_9000_2000_0000`. Each of the
-eight slots occupies six 4 KiB pages: one unmapped lower guard, four mapped
-stack pages (16 KiB), and one unmapped upper guard. Region end and every slot
+eight slots occupies eighteen 4 KiB pages: one unmapped lower guard, sixteen
+mapped stack pages (64 KiB), and one unmapped upper guard. Each slot spans
+72 KiB. Region end and every slot
 address are calculated with checked arithmetic and canonical/page-alignment
 validation. The whole region is checked against existing mappings before
 mapping; any collision or mapping failure aborts scheduler initialization.
@@ -215,8 +216,9 @@ IRQ0 handling increments the existing monotonic tick once, optionally
 records the existing CPL3 test observation, makes a scheduling decision only
 for CPL0-origin interrupts, sends exactly one PIC EOI, and restores the
 selected interrupt frame. The scheduler does not enable interrupts itself.
-No scheduler task is scheduled from a CPL3 IRQ. The existing provisional
-`int 0x80` path and TSS.RSP0 remain unchanged.
+No scheduler task is scheduled from a CPL3 IRQ. The ABI v1 `int 0x80` path
+uses the current task's TSS.RSP0 and runs with maskable interrupts disabled
+until its handler returns.
 
 ## Failure, panic, and limitations
 
@@ -226,7 +228,7 @@ invalid contexts, and state/queue corruption are fatal kernel invariants.
 Panic remains kernel-fatal because panic strategy is abort; there is no
 per-task unwind/recovery.
 
-Limitations: one CPU, 8259 PIC/PIT only, eight fixed task slots, 16 KiB
+Limitations: one CPU, 8259 PIC/PIT only, eight fixed task slots, 64 KiB
 fixed-size stacks, fixed virtual stack region, no stack growth, no blocking,
 sleep, wait queues, join, priorities, user-task scheduling, CR3 switching,
 SMP, or physical-frame reclamation. Compiler-generated FPU/SIMD is disabled
