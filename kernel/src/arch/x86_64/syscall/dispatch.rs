@@ -89,11 +89,7 @@ fn current_process() -> Result<crate::process::ProcessId, u64> {
     crate::task::current_user_process_id().ok_or(SyscallError::InvalidContext.encode())
 }
 
-fn copy_user_path<'a>(
-    address: u64,
-    length: u64,
-    bytes: &'a mut [u8; MAX_USER_PATH],
-) -> Result<&'a str, u64> {
+fn copy_user_path(address: u64, length: u64, bytes: &mut [u8; MAX_USER_PATH]) -> Result<&str, u64> {
     let length = usize::try_from(length).map_err(|_| SyscallError::InvalidArgument.encode())?;
     if length == 0 || length > bytes.len() {
         return Err(SyscallError::InvalidArgument.encode());
